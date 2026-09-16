@@ -133,6 +133,12 @@ class QuestionEngine:
             conn.cursor().execute("UPDATE questions SET is_used = 1 WHERE id = ?", (question_id,))
             conn.commit()
 
+    def reset_all_used(self):
+        """Đặt lại is_used = 0 cho toàn bộ câu hỏi trong CSDL"""
+        with self._get_connection() as conn:
+            conn.cursor().execute("UPDATE questions SET is_used = 0")
+            conn.commit()
+
 # TEST ĐỘC LẬP TẠI TERMINAL
 if __name__ == "__main__":
     print("=== DANG CHAY TEST QUESTION CORE (CA 3 VONG) ===")

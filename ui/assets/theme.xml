@@ -1,0 +1,36 @@
+<?xml version="1.0" ?>
+<JeopardyTheme name="Custom_Broadcast_Package">
+    <Bezel color="#000000" width="5"/>
+    <StandbyScreen image_path="assets/images/header_revealed_bg.png"/>
+    <CategoryHeaders fit_mode="zoom">
+        <StateUnrevealed image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/ppt/media/image2.png"/>
+        <StateRevealed image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/ppt/media/image1.jpeg"/>
+        <Font family="Georgia" size="48" bold="true" color="#FFFFFF"/>
+    </CategoryHeaders>
+    <PointGrid fit_mode="tile">
+        <Mode use_image="true"/>
+        <SolidColor value="#060CE9"/>
+        <TileImage path="C:/Users/Admin/Downloads/jep! (1) - Copy/ppt/media/image1.jpeg"/>
+        <PointFont family="Impact" size="48" bold="true" color="#FFA500"/>
+    </PointGrid>
+    <ClueScreen fit_mode="zoom">
+        <OuterBackground color="#000000"/>
+        <StandardCard color="#060CE9" image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/ppt/media/image1.jpeg" use_image="true"/>
+        <FinalCard color="#8B0000" image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/ppt/media/image32.png" use_image="true"/>
+        <Font family="Georgia" size="48" bold="true" color="#FFFFFF"/>
+        <Shadow blur="2" dx="3" dy="3" color="#000000"/>
+    </ClueScreen>
+    <VisualFX>
+        <DailyDoubleSplash path="assets/images/daily_double.png"/>
+        <FinalLogoSplash path="assets/images/final_jeopardy_logo.png"/>
+    </VisualFX>
+    <Sounds>
+        <Sound key="fill" path="C:/Users/Admin/Downloads/media3.wav"/>
+        <Sound key="daily_double" path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/audio2.wav"/>
+        <Sound key="think_music" path="C:/Users/Admin/Downloads/jep! (1) - Copy/ppt/media/media6.wav"/>
+        <Sound key="time_out" path="assets/sounds/times_up.wav"/>
+        <Sound key="correct" path="assets/sounds/correct.wav"/>
+        <Sound key="wrong" path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/audio1.wav"/>
+        <Sound key="category_intro" path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/media5.wav"/>
+    </Sounds>
+</JeopardyTheme>

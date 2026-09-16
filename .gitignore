@@ -1,1 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
 venv/
+.venv/
+env/
+ENV/
+
+# Tests & Test Runners
+tests/
+test/
+test_*.py
+*_test.py
+*.test.*
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Scratch, test renders, & temporary scripts
+scratch/
+renders/
+*.log
+
+# Database & Documentation
+questions.db/
+readme_gemini.md

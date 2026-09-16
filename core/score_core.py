@@ -60,6 +60,12 @@ class ScoreEngine:
             self.players[p_id]["score"] += pts
         return True
 
+    def reset_scores(self):
+        """Đặt lại toàn bộ điểm số về 0 và xóa lịch sử undo."""
+        for p_id in self.players:
+            self.players[p_id]["score"] = 0
+        self.history.clear()
+
 # TEST ĐỘC LẬP TẠI TERMINAL
 if __name__ == "__main__":
     print("=== TEST NHÂN TÍNH ĐIỂM ===")
