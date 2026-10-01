@@ -1,0 +1,290 @@
+{
+  "rounds": [
+    {
+      "id": 1,
+      "name": "Jeopardy!",
+      "round_number": 1,
+      "min_value": 200,
+      "max_value": 1000,
+      "value_step": 200,
+      "dd_count": 1
+    },
+    {
+      "id": 2,
+      "name": "Double Jeopardy!",
+      "round_number": 2,
+      "min_value": 400,
+      "max_value": 2000,
+      "value_step": 400,
+      "dd_count": 2
+    },
+    {
+      "id": 3,
+      "name": "Final Jeopardy!",
+      "round_number": 3,
+      "min_value": 0,
+      "max_value": 0,
+      "value_step": 0,
+      "dd_count": 0
+    },
+    {
+      "id": 4,
+      "name": "Tiebreaker",
+      "round_number": 4,
+      "min_value": 0,
+      "max_value": 0,
+      "value_step": 0,
+      "dd_count": 0
+    }
+  ],
+  "categories": [
+    {
+      "name": "WORLD CAPITALS",
+      "round_id": 1,
+      "description": "Capital cities across the globe",
+      "clues": [
+        {"points": 200, "clue": "The capital city of Australia, planned after Sydney and Melbourne contested the honor.", "response": "What is Canberra?"},
+        {"points": 400, "clue": "Located on the Rideau Canal, this city serves as the federal capital of Canada.", "response": "What is Ottawa?"},
+        {"points": 600, "clue": "Known as the Green City in the Sun, it is the high-altitude capital of Kenya.", "response": "What is Nairobi?"},
+        {"points": 800, "clue": "The world's most populous metropolitan capital city, located on Honshu island.", "response": "What is Tokyo?"},
+        {"points": 1000, "clue": "The northernmost capital of a sovereign state in the world.", "response": "What is Reykjavik?"},
+        {"points": 1000, "clue": "Inaugurated as Brazil's planned federal capital in 1960, replacing Rio de Janeiro.", "response": "What is Brasília?"}
+      ]
+    },
+    {
+      "name": "SCIENCE & ELEMENTS",
+      "round_id": 1,
+      "description": "Fundamental elements and biological concepts",
+      "clues": [
+        {"points": 200, "clue": "Represented by the chemical symbol Au, from the Latin word meaning shining dawn.", "response": "What is Gold?"},
+        {"points": 400, "clue": "Known colloquially as the powerhouse of the cell, it generates most chemical ATP.", "response": "What is the Mitochondrion?"},
+        {"points": 600, "clue": "The most abundant gas in Earth's atmosphere, comprising roughly 78 percent by volume.", "response": "What is Nitrogen?"},
+        {"points": 800, "clue": "In a vacuum, this fundamental physical constant travels at approximately 299,792 km per second.", "response": "What is the Speed of Light?"},
+        {"points": 1000, "clue": "With the atomic number 26, this element forms the primary constituent of Earth's core.", "response": "What is Iron?"},
+        {"points": 1000, "clue": "Subatomic particles carrying a negative electric charge, discovered by J.J. Thomson.", "response": "What are Electrons?"}
+      ]
+    },
+    {
+      "name": "FAMOUS INVENTIONS",
+      "round_id": 1,
+      "description": "Groundbreaking technological breakthroughs",
+      "clues": [
+        {"points": 200, "clue": "In 1876, Alexander Graham Bell was awarded the first U.S. patent for this acoustic device.", "response": "What is the Telephone?"},
+        {"points": 400, "clue": "Thomas Edison perfected the long-lasting incandescent bulb at his lab in this New Jersey town.", "response": "What is Menlo Park?"},
+        {"points": 600, "clue": "Johannes Gutenberg revolutionized literacy in the 1440s with this movable type invention.", "response": "What is the Printing Press?"},
+        {"points": 800, "clue": "In 1928, Alexander Fleming returned from vacation to discover this miracle mold in his lab.", "response": "What is Penicillin?"},
+        {"points": 1000, "clue": "British computer scientist Tim Berners-Lee invented this information system at CERN in 1989.", "response": "What is the World Wide Web?"},
+        {"points": 1000, "clue": "Orville and Wilbur Wright achieved the first controlled, powered flight at Kitty Hawk in this state.", "response": "What is North Carolina?"}
+      ]
+    },
+    {
+      "name": "FOOD & CUISINE",
+      "round_id": 1,
+      "description": "Gastronomy and international culinary traditions",
+      "clues": [
+        {"points": 200, "clue": "This Japanese dish features seasoned vinegared rice garnished with raw fish or nori.", "response": "What is Sushi?"},
+        {"points": 400, "clue": "Originating in Valencia, this saffron-infused rice dish is cooked in a wide, shallow pan.", "response": "What is Paella?"},
+        {"points": 600, "clue": "This crescent-shaped buttery pastry was inspired by Austrian kipferl but perfected in France.", "response": "What is a Croissant?"},
+        {"points": 800, "clue": "This traditional Mexican dish consists of folded corn or wheat tortillas filled with savory meats.", "response": "What are Tacos?"},
+        {"points": 1000, "clue": "A staple of Korean dining, this fermented cabbage dish is seasoned with gochugaru and garlic.", "response": "What is Kimchi?"},
+        {"points": 1000, "clue": "Italian frozen dessert made with a higher proportion of milk to cream and churned at a slower speed.", "response": "What is Gelato?"}
+      ]
+    },
+    {
+      "name": "POPULAR MOVIES",
+      "round_id": 1,
+      "description": "Iconic cinematic masterpieces and box-office champions",
+      "clues": [
+        {"points": 200, "clue": "James Cameron directed this 1997 epic romance starring Leonardo DiCaprio and Kate Winslet.", "response": "What is Titanic?"},
+        {"points": 400, "clue": "Marlon Brando starred as Don Vito Corleone in this 1972 Francis Ford Coppola masterpiece.", "response": "What is The Godfather?"},
+        {"points": 600, "clue": "George Lucas launched this space opera franchise in 1977 with the subtitle A New Hope.", "response": "What is Star Wars?"},
+        {"points": 800, "clue": "Steven Spielberg brought Michael Crichton's genetically cloned dinosaurs to life in this 1993 film.", "response": "What is Jurassic Park?"},
+        {"points": 1000, "clue": "Christopher Nolan directed this 2010 mind-bending thriller about subconscious dream extraction.", "response": "What is Inception?"},
+        {"points": 1000, "clue": "Set on the lush moon of Pandora, this 2009 sci-fi blockbuster became the highest-grossing film of all time.", "response": "What is Avatar?"}
+      ]
+    },
+    {
+      "name": "SPORTS & ATHLETES",
+      "round_id": 1,
+      "description": "Legendary athletes and sports achievements",
+      "clues": [
+        {"points": 200, "clue": "This Chicago Bulls legend led his team to six NBA championships and wore jersey number 23.", "response": "Who is Michael Jordan?"},
+        {"points": 400, "clue": "Nicknamed The King, this Brazilian football legend won three FIFA World Cup titles.", "response": "Who is Pelé?"},
+        {"points": 600, "clue": "This Jamaican sprinter holds the world record for the 100m sprint at 9.58 seconds.", "response": "Who is Usain Bolt?"},
+        {"points": 800, "clue": "This tennis icon has captured 23 Grand Slam singles titles in the Open Era.", "response": "Who is Serena Williams?"},
+        {"points": 1000, "clue": "Born Cassius Clay, this heavyweight champion famously declared I am the greatest.", "response": "Who is Muhammad Ali?"},
+        {"points": 1000, "clue": "The most decorated Olympian in history, this American swimmer has won 28 total Olympic medals.", "response": "Who is Michael Phelps?"}
+      ]
+    },
+    {
+      "name": "VIDEO GAMES",
+      "round_id": 1,
+      "description": "Video game history and iconic franchises",
+      "clues": [
+        {"points": 200, "clue": "Nintendo's mustachioed Italian plumber mascot who first appeared in 1981's Donkey Kong.", "response": "Who is Mario?"},
+        {"points": 400, "clue": "Created by Markus Persson, this voxel sandbox game became the best-selling game of all time.", "response": "What is Minecraft?"},
+        {"points": 600, "clue": "Link embarks on quests to rescue Princess Zelda in the magical kingdom of Hyrule in this series.", "response": "What is The Legend of Zelda?"},
+        {"points": 800, "clue": "Toru Iwatani designed this 1980 yellow arcade character inspired by a pizza missing a slice.", "response": "What is Pac-Man?"},
+        {"points": 1000, "clue": "Sega's supersonic blue hedgehog who collects golden rings while battling Dr. Robotnik.", "response": "Who is Sonic the Hedgehog?"},
+        {"points": 1000, "clue": "Created by Alexey Pajitnov in 1984, this tile-matching puzzle game is named after the Greek word for four.", "response": "What is Tetris?"}
+      ]
+    },
+    {
+      "name": "ABBREVIATIONS",
+      "round_id": 1,
+      "description": "Famous acronyms and initialisms in everyday use",
+      "clues": [
+        {"points": 200, "clue": "This civilian space agency was established by President Dwight D. Eisenhower in 1958.", "response": "What is NASA?"},
+        {"points": 400, "clue": "This UN agency promotes world peace through education, science, and World Heritage Sites.", "response": "What is UNESCO?"},
+        {"points": 600, "clue": "Light Amplification by Stimulated Emission of Radiation is abbreviated as this acronym.", "response": "What is LASER?"},
+        {"points": 800, "clue": "Underwater divers breathe safely using this acronym: Self-Contained Underwater Breathing Apparatus.", "response": "What is SCUBA?"},
+        {"points": 1000, "clue": "The intergovernmental military alliance established by the North Atlantic Treaty in 1949.", "response": "What is NATO?"},
+        {"points": 1000, "clue": "Radio Detection and Ranging is condensed into this 5-letter navigation term.", "response": "What is RADAR?"}
+      ]
+    },
+    {
+      "name": "WORLD LITERATURE",
+      "round_id": 2,
+      "description": "Literary classics and monumental authors",
+      "clues": [
+        {"points": 400, "clue": "Prince of Denmark who contemplates 'To be, or not to be' in William Shakespeare's tragedy.", "response": "Who is Hamlet?"},
+        {"points": 800, "clue": "This Greek epic poem by Homer recounts Odysseus's treacherous 10-year journey home to Ithaca.", "response": "What is the Odyssey?"},
+        {"points": 1200, "clue": "Gabriel García Márquez chronicled seven generations of the Buendía family in this magical realist town.", "response": "What is Macondo?"},
+        {"points": 1600, "clue": "Dante Alighieri traverses Inferno, Purgatorio, and Paradiso guided by Virgil in this 14th-century epic.", "response": "What is The Divine Comedy?"},
+        {"points": 2000, "clue": "Leo Tolstoy painted the panoramic Russian society during the Napoleonic Wars in this epic novel.", "response": "What is War and Peace?"},
+        {"points": 2000, "clue": "Miguel de Cervantes introduced the Knight of the Sorrowful Countenance tilting at windmills in 1605.", "response": "Who is Don Quixote?"}
+      ]
+    },
+    {
+      "name": "ANCIENT HISTORY",
+      "round_id": 2,
+      "description": "Empires, rulers, and milestones of the ancient world",
+      "clues": [
+        {"points": 400, "clue": "Pharaoh Khufu commissioned the oldest and largest of the three Great Pyramids built at this Egyptian site.", "response": "What is Giza?"},
+        {"points": 800, "clue": "On the Ides of March in 44 BC, this Roman dictator was assassinated in the Theatre of Pompey.", "response": "Who is Julius Caesar?"},
+        {"points": 1200, "clue": "This Macedonian conqueror created an empire stretching from Greece to India before dying at age 32.", "response": "Who is Alexander the Great?"},
+        {"points": 1600, "clue": "This Babylonian king proclaimed one of the earliest legal codes around 1754 BC, featuring lex talionis.", "response": "Who is Hammurabi?"},
+        {"points": 2000, "clue": "The 5th-century BC war between the Delian League led by Athens and the Peloponnesian League led by Sparta.", "response": "What is the Peloponnesian War?"},
+        {"points": 2000, "clue": "Found in 1799, this granodiorite stele inscribed in three scripts unlocked ancient Egyptian hieroglyphs.", "response": "What is the Rosetta Stone?"}
+      ]
+    },
+    {
+      "name": "ASTRONOMY & SPACE",
+      "round_id": 2,
+      "description": "Cosmological wonders and deep space exploration",
+      "clues": [
+        {"points": 400, "clue": "The largest planet in our solar system, with a Great Red Spot storm larger than Earth.", "response": "What is Jupiter?"},
+        {"points": 800, "clue": "Also catalogued as M31, this spiral galaxy is the nearest major galactic neighbor to the Milky Way.", "response": "What is Andromeda?"},
+        {"points": 1200, "clue": "On July 20, 1969, Neil Armstrong took his 'one small step' landing Lunar Module Eagle during this mission.", "response": "What is Apollo 11?"},
+        {"points": 1600, "clue": "The boundary marking the threshold around a black hole beyond which nothing, not even light, can escape.", "response": "What is the Event Horizon?"},
+        {"points": 2000, "clue": "Launched in 1977, this NASA spacecraft became the first human-made object to cross into interstellar space.", "response": "What is Voyager 1?"},
+        {"points": 2000, "clue": "Extremely dense stellar remnants formed by the gravitational collapse of a supergiant star.", "response": "What are Neutron Stars?"}
+      ]
+    },
+    {
+      "name": "ART & ARCHITECTURE",
+      "round_id": 2,
+      "description": "Masterpieces of painting, sculpture, and design",
+      "clues": [
+        {"points": 400, "clue": "Leonardo da Vinci's enigmatic portrait of Lisa Gherardini on display in the Louvre.", "response": "What is the Mona Lisa?"},
+        {"points": 800, "clue": "Michelangelo spent four grueling years painting Genesis scenes upon the ceiling of this Vatican chapel.", "response": "What is the Sistine Chapel?"},
+        {"points": 1200, "clue": "Vincent van Gogh painted this swirling nightscape view from his asylum room window at Saint-Rémy.", "response": "What is The Starry Night?"},
+        {"points": 1600, "clue": "Mughal emperor Shah Jahan commissioned this white marble mausoleum in Agra for his wife Mumtaz Mahal.", "response": "What is the Taj Mahal?"},
+        {"points": 2000, "clue": "Pablo Picasso depicted the horrors of the Spanish Civil War in this massive black-and-white 1937 mural.", "response": "What is Guernica?"},
+        {"points": 2000, "clue": "Pericles supervised the 5th-century BC construction of this Doric temple dedicated to Athena atop the Acropolis.", "response": "What is the Parthenon?"}
+      ]
+    },
+    {
+      "name": "PHILOSOPHY & THOUGHT",
+      "round_id": 2,
+      "description": "Philosophical inquiries and foundational thinkers",
+      "clues": [
+        {"points": 400, "clue": "This Athenian philosopher was sentenced to death by drinking hemlock for corrupting the youth.", "response": "Who is Socrates?"},
+        {"points": 800, "clue": "René Descartes formulated this celebrated Latin proposition of radical doubt in his 1637 Discourse on Method.", "response": "What is Cogito, ergo sum?"},
+        {"points": 1200, "clue": "German philosopher who coined the concept of the Übermensch and wrote Thus Spoke Zarathustra.", "response": "Who is Friedrich Nietzsche?"},
+        {"points": 1600, "clue": "Tutor to Alexander the Great and founder of the Lyceum, he authored the Nicomachean Ethics and Metaphysics.", "response": "Who is Aristotle?"},
+        {"points": 2000, "clue": "Enlightenment philosopher who introduced the Categorical Imperative in his Critique of Pure Reason.", "response": "Who is Immanuel Kant?"},
+        {"points": 2000, "clue": "Plato presented his Allegory of the Cave and conceptualized the philosopher-king in this dialogue.", "response": "What is The Republic?"}
+      ]
+    },
+    {
+      "name": "MODERN TECHNOLOGY",
+      "round_id": 2,
+      "description": "Computers, pioneers, and electronic revolutions",
+      "clues": [
+        {"points": 400, "clue": "British mathematician who cracked the Enigma code and conceived the universal computing machine.", "response": "Who is Alan Turing?"},
+        {"points": 800, "clue": "Unlike classical bits, this quantum computing information unit leverages superposition and entanglement.", "response": "What is a Qubit?"},
+        {"points": 1200, "clue": "Invented at Bell Labs in 1947 by Bardeen, Brattain, and Shockley, this device revolutionized electronics.", "response": "What is the Transistor?"},
+        {"points": 1600, "clue": "Often considered the world's first computer programmer for her work on Babbage's Analytical Engine.", "response": "Who is Ada Lovelace?"},
+        {"points": 2000, "clue": "Built at the University of Pennsylvania in 1945, this room-sized machine was the first programmable electronic computer.", "response": "What is ENIAC?"},
+        {"points": 2000, "clue": "The empirical observation that the number of transistors on a microchip doubles roughly every two years.", "response": "What is Moore's Law?"}
+      ]
+    },
+    {
+      "name": "WORLD MYTHOLOGY",
+      "round_id": 2,
+      "description": "Pantheons, legends, and divine folklore",
+      "clues": [
+        {"points": 400, "clue": "The king of the Olympian gods who wielded the thunderbolt and ruled from Mount Olympus.", "response": "Who is Zeus?"},
+        {"points": 800, "clue": "The Norse hammer-wielding god of thunder, protector of mankind, who wields Mjölnir.", "response": "Who is Thor?"},
+        {"points": 1200, "clue": "The jackal-headed ancient Egyptian god associated with mummification and the weighing of the heart.", "response": "Who is Anubis?"},
+        {"points": 1600, "clue": "The feathered serpent deity worshiped by ancient Mesoamerican civilizations including the Aztecs.", "response": "Who is Quetzalcoatl?"},
+        {"points": 2000, "clue": "The Mesopotamian hero-king of Uruk who journeyed to find the secret of immortality in history's oldest epic.", "response": "Who is Gilgamesh?"},
+        {"points": 2000, "clue": "Greek goddess of wisdom and strategic warfare who sprang fully armored from the forehead of Zeus.", "response": "Who is Athena?"}
+      ]
+    },
+    {
+      "name": "MUSIC & COMPOSERS",
+      "round_id": 2,
+      "description": "Symphonic masters, classical compositions, and virtuosos",
+      "clues": [
+        {"points": 400, "clue": "This deaf German composer debuted his monumental Ninth Symphony featuring the Ode to Joy in 1824.", "response": "Who is Ludwig van Beethoven?"},
+        {"points": 800, "clue": "Austrian child prodigy who composed over 600 works including The Magic Flute before dying at age 35.", "response": "Who is Wolfgang Amadeus Mozart?"},
+        {"points": 1200, "clue": "Baroque master whose sacred and secular works include the Brandenburg Concertos and Mass in B minor.", "response": "Who is Johann Sebastian Bach?"},
+        {"points": 1600, "clue": "Venetian priest and violin virtuoso who composed the set of four violin concertos titled The Four Seasons.", "response": "Who is Antonio Vivaldi?"},
+        {"points": 2000, "clue": "Russian romantic composer celebrated for 1812 Overture and the ballet scores for Swan Lake and The Nutcracker.", "response": "Who is Pyotr Ilyich Tchaikovsky?"},
+        {"points": 2000, "clue": "Polish-French romantic composer celebrated for his virtuosic piano nocturnes, mazurkas, and polonaises.", "response": "Who is Frédéric Chopin?"}
+      ]
+    },
+    {
+      "name": "TIME 100",
+      "round_id": 3,
+      "description": "Person of the Century",
+      "clues": [
+        {"points": 0, "clue": "In 1999, Time magazine named this theoretical physicist the Person of the Century for fundamentally reshaping our view of the universe.", "response": "Who is Albert Einstein?"}
+      ]
+    },
+    {
+      "name": "WORLD LEADERS",
+      "round_id": 3,
+      "description": "Elected statesmen and historic firsts",
+      "clues": [
+        {"points": 0, "clue": "At age 39 in 2017, he became the youngest person ever elected President of the French Republic.", "response": "Who is Emmanuel Macron?"}
+      ]
+    },
+    {
+      "name": "CLASSIC NOVELS",
+      "round_id": 3,
+      "description": "Great opening lines",
+      "clues": [
+        {"points": 0, "clue": "This 1851 Herman Melville maritime novel famously begins with the three-word sentence: 'Call me Ishmael.'", "response": "What is Moby-Dick?"}
+      ]
+    },
+    {
+      "name": "AMERICAN PRESIDENTS",
+      "round_id": 4,
+      "description": "Sudden-Death Presidential Trivia",
+      "clues": [
+        {"points": 0, "clue": "The only U.S. President in history to serve two non-consecutive terms prior to the year 2024.", "response": "Who is Grover Cleveland?"}
+      ]
+    },
+    {
+      "name": "GEOGRAPHY FIRSTS",
+      "round_id": 4,
+      "description": "Sudden-Death Geography Clues",
+      "clues": [
+        {"points": 0, "clue": "The highest mountain peak in North America, with a summit elevation of 20,310 feet above sea level.", "response": "What is Denali?"}
+      ]
+    }
+  ]
+}

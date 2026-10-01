@@ -26,30 +26,30 @@ DEFAULT_XML_PATH = DEFAULT_ASSETS_DIR / "theme.xml"
 # =============================================================================
 
 class AssetRenderer:
-    """Bộ dựng hình ảnh đồ họa tiêu chuẩn cho TV Studio Display."""
+    """Standard graphic rendering engine for TV Studio Broadcast Display."""
 
     @staticmethod
     def render_background(painter: QPainter, target_rect: QRect, pixmap: Optional[QPixmap], fit_mode: str = "zoom"):
         """
         fit_mode:
-          - 'zoom': Phóng to giữ tỉ lệ và crop mép thừa (KeepAspectRatioByExpanding)
-          - 'tile': Nhân bản lặp lại ảnh (Texture Pattern Tiling)
+          - 'zoom': Scale preserving aspect ratio and crop overflow margins (KeepAspectRatioByExpanding)
+          - 'tile': Repeat texture pattern (Texture Pattern Tiling)
         """
         if pixmap is None or pixmap.isNull():
             return
 
         if fit_mode == "tile":
-            # Chế độ nhân bản họa tiết (Pattern Tiling)
+            # Pattern Tiling Mode
             brush = QBrush(pixmap)
             painter.fillRect(target_rect, brush)
         else:
-            # Chế độ Zoom phủ kín (KeepAspectRatioByExpanding - Mặc định)
+            # Full Zoom Crop Mode (KeepAspectRatioByExpanding - Default)
             scaled = pixmap.scaled(
                 target_rect.size(),
                 Qt.KeepAspectRatioByExpanding,
                 Qt.SmoothTransformation
             )
-            # Căn giữa và crop phần thừa
+            # Center and crop excess
             x = target_rect.x() + (target_rect.width() - scaled.width()) // 2
             y = target_rect.y() + (target_rect.height() - scaled.height()) // 2
             painter.save()
@@ -63,22 +63,22 @@ class AssetRenderer:
 # =============================================================================
 
 class ThemePackageEngine:
-    """Xử lý nén/giải nén toàn bộ gói giao diện thành file .zip hoặc .openj-theme."""
+    """Manages compression/extraction of theme packages into .zip or .openj-theme packages."""
 
     @staticmethod
     def export_theme_to_zip(xml_path: str, assets_dir: str, output_zip_path: str):
-        """Đóng gói file XML và toàn bộ thư mục hình ảnh/âm thanh thành 1 file .zip"""
+        """Packs the XML file and all images/sounds into a single .zip archive."""
         xml_p = Path(xml_path).resolve()
         assets_p = Path(assets_dir).resolve()
         out_p = Path(output_zip_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
         with zipfile.ZipFile(str(out_p), 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Ghi file theme.xml ở thư mục gốc của zip
+            # Write theme.xml at the root of the zip
             if xml_p.exists():
                 zip_file.write(str(xml_p), arcname="theme.xml")
 
-            # Ghi toàn bộ assets (images, sounds, etc.)
+            # Write all assets (images, sounds, etc.)
             if assets_p.exists():
                 for item in assets_p.rglob("*"):
                     if item.is_file() and item.name != "theme.xml":
@@ -90,7 +90,7 @@ class ThemePackageEngine:
 
     @staticmethod
     def import_theme_from_zip(zip_path: str, extract_to: str) -> Path:
-        """Giải nén gói theme vào thư mục cấu hình và trả về đường dẫn XML."""
+        """Extracts a theme package into target directory and returns the extracted XML path."""
         z_p = Path(zip_path).resolve()
         target_dir = Path(extract_to).resolve()
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -113,11 +113,11 @@ class ThemePackageEngine:
 # =============================================================================
 
 class ThemeConfigManager:
-    """Quản lý đọc/ghi và đồng bộ cấu hình JeopardyTheme XML chuẩn phát sóng."""
+    """Broadcast-standard theme XML configuration reader, writer, and synchronizer."""
 
     @staticmethod
     def resolve_path(raw_path: str, base_dir: Optional[Path] = None) -> str:
-        """Chuyển đổi đường dẫn relative sang absolute an toàn."""
+        """Converts relative asset paths into absolute paths safely."""
         if not raw_path:
             return ""
         p = Path(raw_path)
@@ -130,13 +130,13 @@ class ThemeConfigManager:
             PROJECT_ROOT / "ui",
             PROJECT_ROOT,
         ]
-        # Thử ghép trực tiếp
+        # Direct join test
         for base in search_bases:
             if base:
                 cand = (base / raw_path).resolve()
                 if cand.exists():
                     return str(cand)
-                # Nếu raw_path có 'assets/images/...' mà base là 'ui/assets'
+                # If raw_path has 'assets/images/...' and base is 'ui/assets'
                 if raw_path.startswith("assets/"):
                     cand2 = (base.parent / raw_path).resolve()
                     if cand2.exists():
@@ -144,7 +144,7 @@ class ThemeConfigManager:
                     cand3 = (DEFAULT_ASSETS_DIR / raw_path.replace("assets/", "")).resolve()
                     if cand3.exists():
                         return str(cand3)
-                # Thử tìm theo basename trong image/sounds
+                # Fallback search by filename in images/sounds
                 cand_img = DEFAULT_ASSETS_DIR / "images" / p.name
                 if cand_img.exists():
                     return str(cand_img)
@@ -159,13 +159,13 @@ class ThemeConfigManager:
 
     @classmethod
     def get_default_theme(cls) -> Dict[str, Any]:
-        """Tạo cấu hình theme mặc định chuẩn Custom_Broadcast_Package."""
+        """Generates default theme configuration matching reference broadcast standard."""
         return {
             "name": "Custom_Broadcast_Package",
             "bezel_color": "#000000",
             "bezel_width": 8,
             "standby_screen": {
-                "image_path": cls.resolve_path("images/header_revealed_bg.png"),
+                "image_path": cls.resolve_path("images/standby_static.png"),
             },
             "category_headers": {
                 "fit_mode": "zoom",
@@ -201,18 +201,22 @@ class ThemeConfigManager:
                 "final_logo_splash": cls.resolve_path("images/final_jeopardy_logo.png"),
             },
             "sounds": {
-                "fill": cls.resolve_path("sounds/coin_drop.wav"),
-                "daily_double": cls.resolve_path("sounds/dd_laser.wav"),
+                "fill": cls.resolve_path("sounds/fill.mp3"),
+                "board_fill": cls.resolve_path("sounds/fill.mp3"),
+                "daily_double": cls.resolve_path("sounds/daily_double.wav"),
                 "think_music": cls.resolve_path("sounds/think_30s.wav"),
-                "time_out": cls.resolve_path("sounds/times_up.wav"),
+                "think_30s": cls.resolve_path("sounds/think_30s.wav"),
+                "time_out": cls.resolve_path("sounds/timeout.wav"),
+                "timeout": cls.resolve_path("sounds/timeout.wav"),
                 "correct": cls.resolve_path("sounds/correct.wav"),
                 "wrong": cls.resolve_path("sounds/wrong.wav"),
+                "category_intro": cls.resolve_path("sounds/category_intro.wav"),
             }
         }
 
     @classmethod
     def load_theme_xml(cls, xml_path: Optional[str] = None) -> Dict[str, Any]:
-        """Đọc và parse file theme.xml, trả về dict cấu hình đầy đủ."""
+        """Reads and parses theme.xml, returning a complete configuration dictionary."""
         if xml_path is None or not Path(xml_path).exists():
             xml_path = str(DEFAULT_XML_PATH)
 
@@ -233,23 +237,51 @@ class ThemeConfigManager:
                 theme["bezel_color"] = bezel_node.attrib.get("color", theme["bezel_color"])
                 theme["bezel_width"] = int(bezel_node.attrib.get("width", theme["bezel_width"]))
 
-            # StandbyScreen
+            # StandbyMosaicZone (Part 3) & StandbyScreen
+            smz_node = root.find("StandbyMosaicZone")
+            if smz_node is not None:
+                mi_node = smz_node.find("MosaicImage")
+                if mi_node is not None:
+                    p_val = mi_node.attrib.get("path", "")
+                    theme["standby_screen"]["image_path"] = cls.resolve_path(p_val, base_dir)
             sb_node = root.find("StandbyScreen")
             if sb_node is not None:
-                theme["standby_screen"] = {
-                    "image_path": cls.resolve_path(sb_node.attrib.get("image_path", ""), base_dir)
-                }
+                p_val = sb_node.attrib.get("image_path", "")
+                if p_val:
+                    theme["standby_screen"]["image_path"] = cls.resolve_path(p_val, base_dir)
 
-            # CategoryHeaders
+            # HeaderZone (Part 3)
+            hz_node = root.find("HeaderZone")
+            if hz_node is not None:
+                unrev = hz_node.find("UnrevealedLogo")
+                if unrev is not None:
+                    p_val = unrev.attrib.get("path") or unrev.attrib.get("image_path", "")
+                    theme["category_headers"]["unrevealed_image"] = cls.resolve_path(p_val, base_dir)
+                rev = hz_node.find("RevealedBackground")
+                if rev is not None:
+                    p_val = rev.attrib.get("path") or rev.attrib.get("image_path", "")
+                    theme["category_headers"]["revealed_image"] = cls.resolve_path(p_val, base_dir)
+                f_node = hz_node.find("Font")
+                if f_node is not None:
+                    theme["category_headers"]["font"]["family"] = f_node.attrib.get("family", "Georgia")
+                    theme["category_headers"]["font"]["size"] = int(f_node.attrib.get("size", 28))
+                    theme["category_headers"]["font"]["bold"] = f_node.attrib.get("bold", "true").lower() == "true"
+                    theme["category_headers"]["font"]["color"] = f_node.attrib.get("color", "#FFFFFF")
+
+            # CategoryHeaders (Backward Compatibility)
             ch_node = root.find("CategoryHeaders")
             if ch_node is not None:
                 theme["category_headers"]["fit_mode"] = ch_node.attrib.get("fit_mode", "zoom")
                 unrev = ch_node.find("StateUnrevealed")
                 if unrev is not None:
-                    theme["category_headers"]["unrevealed_image"] = cls.resolve_path(unrev.attrib.get("image_path", ""), base_dir)
+                    p_val = unrev.attrib.get("image_path") or unrev.attrib.get("path", "")
+                    if p_val:
+                        theme["category_headers"]["unrevealed_image"] = cls.resolve_path(p_val, base_dir)
                 rev = ch_node.find("StateRevealed")
                 if rev is not None:
-                    theme["category_headers"]["revealed_image"] = cls.resolve_path(rev.attrib.get("image_path", ""), base_dir)
+                    p_val = rev.attrib.get("image_path") or rev.attrib.get("path", "")
+                    if p_val:
+                        theme["category_headers"]["revealed_image"] = cls.resolve_path(p_val, base_dir)
                 f_node = ch_node.find("Font")
                 if f_node is not None:
                     theme["category_headers"]["font"]["family"] = f_node.attrib.get("family", "Georgia")
@@ -330,6 +362,16 @@ class ThemeConfigManager:
                     if k and path_val:
                         theme["sounds"][k] = cls.resolve_path(path_val, base_dir)
 
+            # Part 3 / Master Spec aliases
+            theme["header_zone"] = {
+                "unrevealed_logo": theme["category_headers"].get("unrevealed_image", ""),
+                "revealed_background": theme["category_headers"].get("revealed_image", ""),
+                "font": dict(theme["category_headers"].get("font", {}))
+            }
+            theme["standby_mosaic_zone"] = {
+                "mosaic_image": theme["standby_screen"].get("image_path", "")
+            }
+
         except Exception as e:
             print(f"[ThemeConfigManager] Warning reading XML: {e}")
 
@@ -337,7 +379,7 @@ class ThemeConfigManager:
 
     @classmethod
     def save_theme_xml(cls, theme: Dict[str, Any], xml_path: Optional[str] = None):
-        """Lưu cấu hình theme dict ra file theme.xml chuẩn Broadcast."""
+        """Saves theme dictionary configuration into broadcast-standard theme.xml."""
         if xml_path is None:
             xml_path = str(DEFAULT_XML_PATH)
 
@@ -352,24 +394,42 @@ class ThemeConfigManager:
             "width": str(theme.get("bezel_width", 8))
         })
 
-        # StandbyScreen
+        # StandbyScreen & StandbyMosaicZone (Part 3)
         sb_data = theme.get("standby_screen", {})
+        sb_rel_path = cls._to_relative_assets_path(sb_data.get("image_path", ""))
         ET.SubElement(root, "StandbyScreen", attrib={
-            "image_path": cls._to_relative_assets_path(sb_data.get("image_path", ""))
+            "image_path": sb_rel_path
+        })
+        smz_node = ET.SubElement(root, "StandbyMosaicZone")
+        ET.SubElement(smz_node, "MosaicImage", attrib={
+            "path": sb_rel_path
         })
 
-        # CategoryHeaders
+        # HeaderZone (Part 3 Red Zone) & CategoryHeaders
         ch_data = theme.get("category_headers", {})
+        unrev_path = cls._to_relative_assets_path(ch_data.get("unrevealed_image", ""))
+        rev_path = cls._to_relative_assets_path(ch_data.get("revealed_image", ""))
+        ch_font = ch_data.get("font", {})
+
+        hz_node = ET.SubElement(root, "HeaderZone")
+        ET.SubElement(hz_node, "UnrevealedLogo", attrib={"path": unrev_path})
+        ET.SubElement(hz_node, "RevealedBackground", attrib={"path": rev_path})
+        ET.SubElement(hz_node, "Font", attrib={
+            "family": str(ch_font.get("family", "Georgia")),
+            "size": str(ch_font.get("size", 28)),
+            "bold": str(ch_font.get("bold", True)).lower(),
+            "color": str(ch_font.get("color", "#FFFFFF"))
+        })
+
         ch_node = ET.SubElement(root, "CategoryHeaders", attrib={
             "fit_mode": ch_data.get("fit_mode", "zoom")
         })
         ET.SubElement(ch_node, "StateUnrevealed", attrib={
-            "image_path": cls._to_relative_assets_path(ch_data.get("unrevealed_image", ""))
+            "image_path": unrev_path
         })
         ET.SubElement(ch_node, "StateRevealed", attrib={
-            "image_path": cls._to_relative_assets_path(ch_data.get("revealed_image", ""))
+            "image_path": rev_path
         })
-        ch_font = ch_data.get("font", {})
         ET.SubElement(ch_node, "Font", attrib={
             "family": str(ch_font.get("family", "Georgia")),
             "size": str(ch_font.get("size", 28)),

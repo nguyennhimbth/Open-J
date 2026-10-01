@@ -1,5 +1,5 @@
 """Open-J: Host Controller Dashboard.
-Main control console for Jeopardy! game show host and studio operator.
+Main broadcast control console for Jeopardy! game show host and studio operator.
 Built with PySide6, SQLite, XML, and decoupled event-bus architecture.
 Adheres strictly to official Jeopardy! rules (Season 40 & 41 standard).
 """
@@ -11,15 +11,17 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Ensure project root is in sys.path
-project_root = Path(__file__).resolve().parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from PySide6.QtCore import Qt, QTimer, Slot
-from PySide6.QtGui import QFont, QColor, QPainter
+from PySide6.QtGui import QFont, QColor, QPainter, QAction
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
+    QMenuBar,
+    QMenu,
     QWidget,
     QTabWidget,
     QDockWidget,
@@ -49,17 +51,20 @@ from PySide6.QtWidgets import (
     QFrame,
     QScrollArea,
     QSizePolicy,
+    QInputDialog,
 )
 
 from core.event_bus import event_bus
 from core.score_core import ScoreEngine
+from data.db_manager import DBManager
 from core.question_core import QuestionEngine
 from ui.audio_manager import AudioManager
 from ui.theme_manager import ThemePackageEngine, ThemeConfigManager, AssetRenderer
+from ui.settings_dialog import TVBezelPreviewWidget, SettingsDialog
 
 
 # =============================================================================
-# STYLESHEET CONSTANTS
+# STYLESHEET CONSTANTS (FLAT BROADCAST 2026 DARK THEME)
 # =============================================================================
 
 APP_STYLE = """
@@ -116,6 +121,7 @@ QLineEdit, QSpinBox, QComboBox {
     border: 1px solid #30363d;
     border-radius: 6px;
     padding: 6px 10px;
+    min-height: 24px;
     color: #f0f6fc;
     font-size: 13px;
 }
@@ -181,576 +187,19 @@ QDockWidget::title {
 
 
 # =============================================================================
-# WIDGET: BEZEL PREVIEW
-# =============================================================================
-
-class TVBezelPreviewWidget(QWidget):
-    """Mô phỏng trực quan ma trận màn hình ghép 6x5 góc vuông."""
-
-    def __init__(self, bezel_width=8, bezel_color="#000000", parent=None):
-        super().__init__(parent)
-        self.bezel_width = bezel_width
-        self.bezel_color = QColor(bezel_color)
-        self.setMinimumSize(220, 140)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-    def set_bezel(self, width, color):
-        self.bezel_width = width
-        self.bezel_color = QColor(color)
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        rect = self.rect()
-        painter.fillRect(rect, self.bezel_color)
-
-        cols, rows = 6, 5
-        bw = max(1, int(self.bezel_width * min(rect.width(), rect.height()) / 400))
-        avail_w = rect.width() - (cols + 1) * bw
-        avail_h = rect.height() - (rows + 1) * bw
-
-        if avail_w <= 0 or avail_h <= 0:
-            return
-
-        cell_w = avail_w / cols
-        cell_h = avail_h / rows
-        screen_blue = QColor("#060CE9")
-        header_blue = QColor("#000a8a")
-
-        for r in range(rows):
-            for c in range(cols):
-                x = bw + c * (cell_w + bw)
-                y = bw + r * (cell_h + bw)
-                cell_color = header_blue if r == 0 else screen_blue
-                painter.fillRect(int(x), int(y), int(cell_w), int(cell_h), cell_color)
-                painter.setPen(QColor(255, 255, 255, 30))
-                painter.drawRect(int(x), int(y), int(cell_w) - 1, int(cell_h) - 1)
-
-
-# =============================================================================
-# MODAL: SETTINGS & SOUND DIALOG
-# =============================================================================
-
-class SettingsDialog(QDialog):
-    """Hộp thoại cấu hình Studio: Theme XML, Thẻ câu hỏi, Logo, Bezel, Fit Mode, Sound Manager và Zip Packager."""
-
-    def __init__(self, theme_data, audio_manager, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("⚙ Cài đặt Hệ thống, Tùy biến Đồ họa & Quản lý Gói Theme")
-        self.resize(880, 680)
-        self.setStyleSheet(APP_STYLE)
-
-        # Nạp theme từ XML hoặc dữ liệu hiện có
-        loaded = ThemeConfigManager.load_theme_xml()
-        self.theme = dict(loaded)
-        if isinstance(theme_data, dict):
-            # Cập nhật các trường nếu có
-            for k, v in theme_data.items():
-                if k in self.theme and isinstance(v, dict):
-                    self.theme[k].update(v)
-                else:
-                    self.theme[k] = v
-
-        self.audio_manager = audio_manager
-
-        layout = QVBoxLayout(self)
-        self.tab_widget = QTabWidget(self)
-
-        self.tab1 = self._build_theme_tab()
-        self.tab2 = self._build_sound_tab()
-
-        self.tab_widget.addTab(self.tab1, "1. Giao diện, Đồ họa & Gói Theme (Visuals & Theme Packager)")
-        self.tab_widget.addTab(self.tab2, "2. Quản lý Âm thanh Phát sóng (Sound Manager)")
-        layout.addWidget(self.tab_widget)
-
-        btn_box = QHBoxLayout()
-        btn_apply = QPushButton("💾 Lưu cài đặt & Đóng")
-        btn_apply.setStyleSheet("background-color: #238636; color: white; font-weight: bold; font-size: 14px; padding: 10px 22px;")
-        btn_apply.clicked.connect(self._on_apply)
-
-        btn_close = QPushButton("Đóng")
-        btn_close.clicked.connect(self._on_cancel)
-
-        btn_box.addStretch()
-        btn_box.addWidget(btn_apply)
-        btn_box.addWidget(btn_close)
-        layout.addLayout(btn_box)
-
-    def _build_theme_tab(self):
-        widget = QWidget()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
-
-        # 1. Category Headers (6 ô chủ đề)
-        cat_box = QGroupBox("1. 6 Ô CHỦ ĐỀ TRÊN CÙNG (CATEGORY HEADERS)")
-        cat_layout = QFormLayout(cat_box)
-
-        ch_data = self.theme.get("category_headers", {})
-
-        # Unrevealed image (Logo địa cầu)
-        self.edit_cat_unrev = QLineEdit(ch_data.get("unrevealed_image", ""))
-        btn_unrev = QPushButton("Duyệt ảnh Logo...")
-        btn_unrev.clicked.connect(lambda: self._browse_file(self.edit_cat_unrev, "Ảnh Logo địa cầu chưa mở"))
-        unrev_row = QHBoxLayout()
-        unrev_row.addWidget(self.edit_cat_unrev, 1)
-        unrev_row.addWidget(btn_unrev)
-
-        # Revealed image (Nền chủ đề đã mở)
-        self.edit_cat_rev = QLineEdit(ch_data.get("revealed_image", ""))
-        btn_rev = QPushButton("Duyệt ảnh nền...")
-        btn_rev.clicked.connect(lambda: self._browse_file(self.edit_cat_rev, "Ảnh nền ô chủ đề đã mở"))
-        rev_row = QHBoxLayout()
-        rev_row.addWidget(self.edit_cat_rev, 1)
-        rev_row.addWidget(btn_rev)
-
-        # Fit mode
-        self.combo_cat_fit = QComboBox()
-        self.combo_cat_fit.addItems(["zoom (Zoom Phủ Kín - Aspect Ratio Crop)", "tile (Lặp Họa Tiết - Pattern Repeat)"])
-        if ch_data.get("fit_mode") == "tile":
-            self.combo_cat_fit.setCurrentIndex(1)
-        else:
-            self.combo_cat_fit.setCurrentIndex(0)
-
-        cat_layout.addRow("Ảnh trạng thái CHƯA MỞ (Unrevealed Logo):", unrev_row)
-        cat_layout.addRow("Ảnh trạng thái ĐÃ MỞ (Revealed Background):", rev_row)
-        cat_layout.addRow("Tỉ lệ căn chỉnh ảnh (Fit Mode):", self.combo_cat_fit)
-        layout.addWidget(cat_box)
-
-        # 2. Point Grid (30 ô điểm số)
-        point_box = QGroupBox("2. 30 Ô ĐIỂM SỐ MA TRẬN (POINT GRID: 200 - 1000)")
-        pt_layout = QFormLayout(point_box)
-
-        pg_data = self.theme.get("point_grid", {})
-
-        self.chk_pt_use_image = QCheckBox(" Dùng ảnh/texture nền (Bỏ chọn nếu muốn dùng Màu đặc)")
-        self.chk_pt_use_image.setChecked(bool(pg_data.get("use_image", True)))
-        self.chk_pt_use_image.setStyleSheet("color: #58a6ff; font-weight: bold;")
-
-        self.btn_pt_color = QPushButton("Chọn màu đặc ô điểm...")
-        pt_col = pg_data.get("solid_color", "#060CE9")
-        self.btn_pt_color.setStyleSheet(f"background-color: {pt_col}; color: white; font-weight: bold;")
-        self.btn_pt_color.clicked.connect(self._choose_point_color)
-
-        self.edit_pt_tile = QLineEdit(pg_data.get("tile_image", ""))
-        btn_pt_tile = QPushButton("Duyệt ảnh Texture...")
-        btn_pt_tile.clicked.connect(lambda: self._browse_file(self.edit_pt_tile, "Ảnh texture ô điểm"))
-        pt_tile_row = QHBoxLayout()
-        pt_tile_row.addWidget(self.edit_pt_tile, 1)
-        pt_tile_row.addWidget(btn_pt_tile)
-
-        self.combo_pt_fit = QComboBox()
-        self.combo_pt_fit.addItems(["zoom (Zoom Phủ Kín - Mặc định)", "tile (Lặp Họa Tiết)"])
-        if pg_data.get("fit_mode") == "tile":
-            self.combo_pt_fit.setCurrentIndex(1)
-        else:
-            self.combo_pt_fit.setCurrentIndex(0)
-
-        pt_layout.addRow("Chế độ nền ô điểm:", self.chk_pt_use_image)
-        pt_layout.addRow("Màu đặc (khi không dùng ảnh):", self.btn_pt_color)
-        pt_layout.addRow("Ảnh Texture nền ô điểm:", pt_tile_row)
-        pt_layout.addRow("Tỉ lệ căn chỉnh ảnh ô điểm:", self.combo_pt_fit)
-        layout.addWidget(point_box)
-
-        # 3. Clue Screen (Thẻ câu hỏi thường & Final)
-        clue_box = QGroupBox("3. THẺ CÂU HỎI (CLUE CARDS) & FONT CHỮ DÙNG CHUNG")
-        cl_layout = QFormLayout(clue_box)
-
-        cs_data = self.theme.get("clue_screen", {})
-        std_card = cs_data.get("standard_card", {})
-        fin_card = cs_data.get("final_card", {})
-
-        # Standard Card (Blue)
-        self.chk_std_img = QCheckBox(" Dùng ảnh texture nền (Vòng 1 & 2)")
-        self.chk_std_img.setChecked(bool(std_card.get("use_image", True)))
-        self.chk_std_img.setStyleSheet("color: #58a6ff; font-weight: bold;")
-
-        self.btn_std_color = QPushButton("Màu thẻ Vòng 1 & 2...")
-        std_col = std_card.get("color", "#060CE9")
-        self.btn_std_color.setStyleSheet(f"background-color: {std_col}; color: white; font-weight: bold;")
-        self.btn_std_color.clicked.connect(self._choose_std_card_color)
-
-        self.edit_std_img = QLineEdit(std_card.get("image_path", ""))
-        btn_std_img = QPushButton("Duyệt texture...")
-        btn_std_img.clicked.connect(lambda: self._browse_file(self.edit_std_img, "Ảnh texture thẻ câu hỏi Vòng 1 & 2"))
-        std_row = QHBoxLayout()
-        std_row.addWidget(self.edit_std_img, 1)
-        std_row.addWidget(btn_std_img)
-
-        # Final Card (Red)
-        self.chk_fin_img = QCheckBox(" Dùng ảnh texture nền thứ 2 (Vòng 3 Final Jeopardy)")
-        self.chk_fin_img.setChecked(bool(fin_card.get("use_image", True)))
-        self.chk_fin_img.setStyleSheet("color: #e11d48; font-weight: bold;")
-
-        self.btn_fin_color = QPushButton("Màu thẻ Final Jeopardy...")
-        fin_col = fin_card.get("color", "#8B0000")
-        self.btn_fin_color.setStyleSheet(f"background-color: {fin_col}; color: white; font-weight: bold;")
-        self.btn_fin_color.clicked.connect(self._choose_fin_card_color)
-
-        self.edit_fin_img = QLineEdit(fin_card.get("image_path", ""))
-        btn_fin_img = QPushButton("Duyệt texture...")
-        btn_fin_img.clicked.connect(lambda: self._browse_file(self.edit_fin_img, "Ảnh texture thẻ Final Jeopardy"))
-        fin_row = QHBoxLayout()
-        fin_row.addWidget(self.edit_fin_img, 1)
-        fin_row.addWidget(btn_fin_img)
-
-        # Shared Font for Clue and Category Headers
-        cf_data = cs_data.get("font", {"family": "Georgia", "size": 48, "bold": True})
-        self.shared_font = dict(cf_data)
-
-        self.btn_shared_font = QPushButton("Chọn Font câu hỏi & Chủ đề...")
-        self.btn_shared_font.clicked.connect(self._choose_shared_font)
-        self.lbl_shared_font = QLabel(f"{self.shared_font.get('family', 'Georgia')}, {self.shared_font.get('size', 48)}pt, {'Bold' if self.shared_font.get('bold') else 'Normal'}")
-        self.lbl_shared_font.setStyleSheet("color: #58a6ff; font-weight: bold; background-color: #0d1117; padding: 6px; border-radius: 4px;")
-        f_row = QHBoxLayout()
-        f_row.addWidget(self.btn_shared_font)
-        f_row.addWidget(self.lbl_shared_font, 1)
-
-        cl_layout.addRow("Nền thẻ câu hỏi Vòng 1 & 2:", self.chk_std_img)
-        cl_layout.addRow("Màu thẻ Vòng 1 & 2:", self.btn_std_color)
-        cl_layout.addRow("Ảnh texture thẻ Vòng 1 & 2 (Xanh):", std_row)
-        cl_layout.addRow("Nền thẻ câu hỏi Final (Nền 2):", self.chk_fin_img)
-        cl_layout.addRow("Màu thẻ Final Jeopardy:", self.btn_fin_color)
-        cl_layout.addRow("Ảnh texture thẻ Final (Đỏ):", fin_row)
-        cl_layout.addRow("Font dùng chung (Clue & Category):", f_row)
-        layout.addWidget(clue_box)
-
-        # 4. Visual FX (Daily Double Splash & Final Logo Splash)
-        vfx_box = QGroupBox("4. HIỆU ỨNG DAILY DOUBLE & CHUYỂN CẢNH (VISUAL FX)")
-        vfx_layout = QFormLayout(vfx_box)
-
-        vfx_data = self.theme.get("visual_fx", {})
-
-        self.edit_dd_splash = QLineEdit(vfx_data.get("daily_double_splash", ""))
-        btn_dd_splash = QPushButton("Duyệt ảnh Daily Double...")
-        btn_dd_splash.clicked.connect(lambda: self._browse_file(self.edit_dd_splash, "Ảnh đồ họa Daily Double"))
-        dd_row = QHBoxLayout()
-        dd_row.addWidget(self.edit_dd_splash, 1)
-        dd_row.addWidget(btn_dd_splash)
-
-        self.edit_final_logo = QLineEdit(vfx_data.get("final_logo_splash", ""))
-        btn_final_logo = QPushButton("Duyệt ảnh Logo Final...")
-        btn_final_logo.clicked.connect(lambda: self._browse_file(self.edit_final_logo, "Ảnh Logo Final Jeopardy"))
-        fl_row = QHBoxLayout()
-        fl_row.addWidget(self.edit_final_logo, 1)
-        fl_row.addWidget(btn_final_logo)
-
-        vfx_layout.addRow("Ảnh đồ họa Daily Double Splash:", dd_row)
-        vfx_layout.addRow("Ảnh đồ họa Logo Final Jeopardy:", fl_row)
-        layout.addWidget(vfx_box)
-
-        # 5. Standby Screen (Màn hình chờ Wallpaper)
-        standby_box = QGroupBox("5. MÀN HÌNH CHỜ (STANDBY SCREEN WALLPAPER)")
-        sb_layout = QFormLayout(standby_box)
-        sb_data = self.theme.get("standby_screen", {})
-
-        self.edit_standby_img = QLineEdit(sb_data.get("image_path", ""))
-        btn_standby = QPushButton("Duyệt ảnh Standby...")
-        btn_standby.clicked.connect(lambda: self._browse_file(self.edit_standby_img, "Ảnh màn hình chờ (Wallpaper)"))
-        sb_row = QHBoxLayout()
-        sb_row.addWidget(self.edit_standby_img, 1)
-        sb_row.addWidget(btn_standby)
-        sb_layout.addRow("Ảnh nền Standby (Full-bleed & Mosaic 36 ô):", sb_row)
-        layout.addWidget(standby_box)
-
-        # 6. Bezel Simulation
-        bezel_box = QGroupBox("6. MÔ PHỎNG VIỀN GHÉP (BEZEL SIMULATION - VUÔNG CẠNH 100%)")
-        b_layout = QHBoxLayout(bezel_box)
-        ctrl_frame = QFrame()
-        cf_layout = QFormLayout(ctrl_frame)
-
-        self.bezel_spin = QSpinBox()
-        self.bezel_spin.setRange(0, 24)
-        self.bezel_spin.setValue(int(self.theme.get("bezel_width", 8)))
-        self.bezel_spin.setSuffix(" px")
-        self.bezel_spin.valueChanged.connect(self._on_bezel_changed)
-
-        self.btn_bezel_color = QPushButton("Chọn màu viền...")
-        self.btn_bezel_color.setStyleSheet(f"background-color: {self.theme.get('bezel_color', '#000000')}; color: white;")
-        self.btn_bezel_color.clicked.connect(self._choose_bezel_color)
-
-        cf_layout.addRow("Độ dày viền khe:", self.bezel_spin)
-        cf_layout.addRow("Màu khe viền ghép:", self.btn_bezel_color)
-        b_layout.addWidget(ctrl_frame, 1)
-
-        self.bezel_preview = TVBezelPreviewWidget(int(self.theme.get("bezel_width", 8)), self.theme.get("bezel_color", "#000000"))
-        b_layout.addWidget(self.bezel_preview, 1)
-        layout.addWidget(bezel_box)
-
-        # 6. Theme Package Manager (Zip export / import)
-        zip_box = QGroupBox("7. ĐÓNG GÓI GÓI THEME (THEME PACKAGE MANAGER)")
-        zb_layout = QHBoxLayout(zip_box)
-
-        btn_export_zip = QPushButton("📦 Xuất toàn bộ Theme ra file Zip...")
-        btn_export_zip.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 10px;")
-        btn_export_zip.clicked.connect(self._export_theme_zip)
-
-        btn_import_zip = QPushButton("📥 Nạp Theme từ file Zip...")
-        btn_import_zip.setStyleSheet("background-color: #8957e5; color: white; font-weight: bold; padding: 10px;")
-        btn_import_zip.clicked.connect(self._import_theme_zip)
-
-        zb_layout.addWidget(btn_export_zip)
-        zb_layout.addWidget(btn_import_zip)
-        layout.addWidget(zip_box)
-
-        scroll.setWidget(container)
-        outer = QVBoxLayout(widget)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
-        return widget
-
-    def _build_sound_tab(self):
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(14)
-
-        dir_box = QGroupBox("THƯ MỤC ÂM THANH STUDIO")
-        db_layout = QHBoxLayout(dir_box)
-        self.dir_edit = QLineEdit(str(self.audio_manager.sounds_dir))
-        btn_dir = QPushButton("Duyệt thư mục...")
-        btn_dir.clicked.connect(self._on_browse_sounds_dir)
-        db_layout.addWidget(self.dir_edit, 1)
-        db_layout.addWidget(btn_dir)
-        layout.addWidget(dir_box)
-
-        event_box = QGroupBox("GÁN TẬP TIN ÂM THANH THEO SỰ KIỆN (KHÔNG CHẠY ÂM DEMO)")
-        eb_layout = QVBoxLayout(event_box)
-
-        events_def = [
-            ("fill", "Board Fill (Lật ngẫu nhiên 30 ô / Coin drop)"),
-            ("category_intro", "Category Reveal Intro (Giới thiệu chủ đề)"),
-            ("daily_double", "Daily Double Fanfare / Laser"),
-            ("think_music", "Think Music (Nhạc suy nghĩ 30s Final)"),
-            ("time_out", "Time Out (Hết giờ suy nghĩ / Buzzer)"),
-            ("correct", "Correct (Trả lời đúng / Chime)"),
-            ("wrong", "Wrong / Incorrect (Trả lời sai / Buzzer)"),
-        ]
-
-        sounds_dict = self.theme.get("sounds", {})
-        self.sound_edits = {}
-        for key, title in events_def:
-            row = QHBoxLayout()
-            lbl = QLabel(f"• {title} [{key}]:")
-            lbl.setFixedWidth(290)
-
-            cur_file = sounds_dict.get(key, "")
-            if not cur_file:
-                cur_file = self.audio_manager.sound_files.get(key, "")
-
-            edit = QLineEdit(cur_file)
-            self.sound_edits[key] = edit
-
-            btn_browse = QPushButton("Chọn...")
-            btn_browse.clicked.connect(lambda chk=False, k=key, e=edit: self._on_browse_sound_file(k, e))
-
-            btn_test = QPushButton("▶ Nghe thử")
-            btn_test.setStyleSheet("color: #3fb950; font-weight: bold;")
-            btn_test.clicked.connect(lambda chk=False, k=key, e=edit: self._test_sound_preview(k, e))
-
-            row.addWidget(lbl)
-            row.addWidget(edit, 1)
-            row.addWidget(btn_browse)
-            row.addWidget(btn_test)
-            eb_layout.addLayout(row)
-
-        layout.addWidget(event_box)
-        layout.addStretch()
-        return widget
-
-    def _browse_file(self, line_edit: QLineEdit, dialog_title: str):
-        f, _ = QFileDialog.getOpenFileName(self, dialog_title, "", "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)")
-        if f:
-            line_edit.setText(f)
-
-    def _choose_point_color(self):
-        c = QColorDialog.getColor(QColor(self.theme.get("point_grid", {}).get("solid_color", "#060CE9")), self, "Chọn màu đặc ô điểm số")
-        if c.isValid():
-            self.theme.setdefault("point_grid", {})["solid_color"] = c.name()
-            self.btn_pt_color.setStyleSheet(f"background-color: {c.name()}; color: white; font-weight: bold;")
-
-    def _choose_std_card_color(self):
-        c = QColorDialog.getColor(QColor(self.theme.get("clue_screen", {}).get("standard_card", {}).get("color", "#060CE9")), self, "Chọn màu thẻ câu hỏi Vòng 1 & 2")
-        if c.isValid():
-            self.theme.setdefault("clue_screen", {}).setdefault("standard_card", {})["color"] = c.name()
-            self.btn_std_color.setStyleSheet(f"background-color: {c.name()}; color: white; font-weight: bold;")
-
-    def _choose_fin_card_color(self):
-        c = QColorDialog.getColor(QColor(self.theme.get("clue_screen", {}).get("final_card", {}).get("color", "#8B0000")), self, "Chọn màu thẻ Final Jeopardy")
-        if c.isValid():
-            self.theme.setdefault("clue_screen", {}).setdefault("final_card", {})["color"] = c.name()
-            self.btn_fin_color.setStyleSheet(f"background-color: {c.name()}; color: white; font-weight: bold;")
-
-    def _choose_shared_font(self):
-        curr = self.shared_font
-        qf = QFont(curr.get("family", "Georgia"), curr.get("size", 48))
-        qf.setBold(bool(curr.get("bold", True)))
-        ok, font = QFontDialog.getFont(qf, self, "Chọn Font dùng chung cho Manh Mối & Tiêu Đề Chủ Đề")
-        if ok:
-            self.shared_font = {
-                "family": font.family(),
-                "size": font.pointSize(),
-                "bold": font.bold(),
-                "color": "#FFFFFF"
-            }
-            desc = f"{font.family()}, {font.pointSize()}pt, {'Bold' if font.bold() else 'Normal'}"
-            self.lbl_shared_font.setText(desc)
-
-    def _choose_bezel_color(self):
-        c = QColorDialog.getColor(QColor(self.theme.get("bezel_color", "#000000")), self, "Chọn màu viền Bezel")
-        if c.isValid():
-            hex_c = c.name()
-            self.theme["bezel_color"] = hex_c
-            self.btn_bezel_color.setStyleSheet(f"background-color: {hex_c}; color: white;")
-            self.bezel_preview.set_bezel(self.bezel_spin.value(), hex_c)
-
-    def _on_bezel_changed(self):
-        w = self.bezel_spin.value()
-        c = self.theme.get("bezel_color", "#000000")
-        self.theme["bezel_width"] = w
-        self.bezel_preview.set_bezel(w, c)
-
-    def _on_browse_sounds_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Chọn thư mục âm thanh", self.dir_edit.text())
-        if d:
-            self.dir_edit.setText(d)
-            self.audio_manager.sounds_dir = Path(d)
-
-    def _on_browse_sound_file(self, key, edit):
-        f, _ = QFileDialog.getOpenFileName(self, f"Chọn file âm thanh cho {key}", self.dir_edit.text(), "Audio Files (*.wav *.mp3 *.ogg);;All Files (*)")
-        if f:
-            edit.setText(f)
-            self.audio_manager.set_sound_file(key, f)
-
-    def _test_sound_preview(self, key, edit):
-        fn = edit.text().strip()
-        if fn and os.path.exists(fn):
-            self.audio_manager.set_sound_file(key, fn)
-            self.audio_manager.play_sound(key)
-        else:
-            self.audio_manager.play_sound(key)
-
-    def _export_theme_zip(self):
-        """Xuất toàn bộ cấu hình và assets thành file .zip"""
-        self._collect_ui_to_theme()
-        # Lưu theme.xml tạm
-        ThemeConfigManager.save_theme_xml(self.theme)
-
-        f, _ = QFileDialog.getSaveFileName(self, "Xuất gói Theme ra file Zip", "broadcast_theme.openj-theme", "Open-J Theme (*.openj-theme *.zip);;All Files (*)")
-        if f:
-            try:
-                xml_path = str(PROJECT_ROOT / "ui" / "assets" / "theme.xml")
-                assets_dir = str(PROJECT_ROOT / "ui" / "assets")
-                ThemePackageEngine.export_theme_to_zip(xml_path, assets_dir, f)
-                QMessageBox.information(self, "Thành công", f"Đã xuất gói theme trọn gói thành công!\n{f}")
-            except Exception as e:
-                QMessageBox.critical(self, "Lỗi", f"Không thể xuất file zip: {e}")
-
-    def _import_theme_zip(self):
-        """Nạp gói theme từ file .zip"""
-        f, _ = QFileDialog.getOpenFileName(self, "Chọn gói Theme để nạp", "", "Open-J Theme (*.openj-theme *.zip);;All Files (*)")
-        if f:
-            try:
-                extract_to = str(PROJECT_ROOT / "ui" / "assets")
-                xml_path = ThemePackageEngine.import_theme_from_zip(f, extract_to)
-                self.theme = ThemeConfigManager.load_theme_xml(str(xml_path))
-                event_bus.reload_theme_config.emit()
-                event_bus.update_theme_config.emit(self.theme)
-                QMessageBox.information(self, "Thành công", "Đã nạp và giải nén gói Theme thành công! Giao diện đã được làm mới.")
-                self.accept()
-            except Exception as e:
-                QMessageBox.critical(self, "Lỗi", f"Không thể nạp file zip: {e}")
-
-    def _collect_ui_to_theme(self):
-        """Thu thập dữ liệu từ các widget trên UI vào self.theme dict."""
-        self.theme["bezel_width"] = self.bezel_spin.value()
-
-        # CategoryHeaders
-        ch = self.theme.setdefault("category_headers", {})
-        ch["unrevealed_image"] = self.edit_cat_unrev.text().strip()
-        ch["revealed_image"] = self.edit_cat_rev.text().strip()
-        ch["fit_mode"] = "tile" if "tile" in self.combo_cat_fit.currentText() else "zoom"
-        ch["font"] = dict(self.shared_font)
-
-        # PointGrid
-        pg = self.theme.setdefault("point_grid", {})
-        pg["use_image"] = self.chk_pt_use_image.isChecked()
-        pg["tile_image"] = self.edit_pt_tile.text().strip()
-        pg["fit_mode"] = "tile" if "tile" in self.combo_pt_fit.currentText() else "zoom"
-
-        # ClueScreen
-        cs = self.theme.setdefault("clue_screen", {})
-        std = cs.setdefault("standard_card", {})
-        std["use_image"] = self.chk_std_img.isChecked()
-        std["image_path"] = self.edit_std_img.text().strip()
-
-        fin = cs.setdefault("final_card", {})
-        fin["use_image"] = self.chk_fin_img.isChecked()
-        fin["image_path"] = self.edit_fin_img.text().strip()
-
-        cs["font"] = dict(self.shared_font)
-
-        # StandbyScreen
-        sb = self.theme.setdefault("standby_screen", {})
-        sb["image_path"] = self.edit_standby_img.text().strip()
-
-        # VisualFX
-        vfx = self.theme.setdefault("visual_fx", {})
-        vfx["daily_double_splash"] = self.edit_dd_splash.text().strip()
-        vfx["final_logo_splash"] = self.edit_final_logo.text().strip()
-
-        # Sounds
-        sounds = self.theme.setdefault("sounds", {})
-        for k, e in self.sound_edits.items():
-            path_val = e.text().strip()
-            sounds[k] = path_val
-            if path_val:
-                self.audio_manager.set_sound_file(k, path_val)
-
-    def _on_apply(self):
-        """
-        Bấm [Lưu cài đặt]:
-        - Ngay lập tức dừng mọi âm thanh đang phát.
-        - Áp dụng cấu hình và lưu ra theme.xml.
-        - Bắn tín hiệu reload_theme_config và update_theme_config.
-        - Đóng Dialog ngay lập tức (self.accept()), tuyệt đối không rò rỉ âm thanh demo.
-        """
-        self.audio_manager.stop_all()
-        self._collect_ui_to_theme()
-
-        # Ghi ra file XML chuẩn Broadcast
-        ThemeConfigManager.save_theme_xml(self.theme)
-
-        # Bắn tín hiệu cập nhật sang TV Display
-        event_bus.reload_theme_config.emit()
-        event_bus.update_theme_config.emit(self.theme)
-
-        self.accept()
-
-    def _on_cancel(self):
-        self.audio_manager.stop_all()
-        self.reject()
-
-
-# =============================================================================
 # MAIN CONTROLLER WINDOW
 # =============================================================================
 
 class HostControllerWindow(QMainWindow):
-    """Bàn điều khiển Host và Studio Operator chuẩn Broadcast."""
+    """Broadcast-standard Host and Studio Operator Console."""
 
     def __init__(self, q_engine=None, s_engine=None, db_path="data/questions.db", parent=None):
         super().__init__(parent)
         if not os.path.isabs(db_path):
-            db_path = str((project_root / db_path).resolve())
+            db_path = str((PROJECT_ROOT / db_path).resolve())
         self.db_path = db_path
 
-        self.setWindowTitle("Open-J | Host Controller Dashboard (Season 40 & 41 Standard)")
+        self.setWindowTitle("Open-J | Host Controller Dashboard")
         self.setMinimumSize(1280, 800)
         self.resize(1366, 860)
 
@@ -761,9 +210,9 @@ class HostControllerWindow(QMainWindow):
         self.q_engine = q_engine
 
         self.contestants = {
-            "p1": {"name": "Ken Jennings", "status": "Đương kim vô địch", "wins": 74, "prev_earnings": 2520700, "score": 0},
-            "p2": {"name": "Gold Ship", "status": "Người chơi mới", "wins": 0, "prev_earnings": 0, "score": 0},
-            "p3": {"name": "Agnes Tachyon", "status": "Người chơi mới", "wins": 0, "prev_earnings": 0, "score": 0},
+            "p1": {"name": "Ken Jennings", "status": "Returning Champion", "wins": 74, "prev_earnings": 2520700, "score": 0},
+            "p2": {"name": "Gold Ship", "status": "New Challenger", "wins": 0, "prev_earnings": 0, "score": 0},
+            "p3": {"name": "Agnes Tachyon", "status": "New Challenger", "wins": 0, "prev_earnings": 0, "score": 0},
         }
 
         if s_engine is None:
@@ -772,13 +221,15 @@ class HostControllerWindow(QMainWindow):
 
         self.audio_manager = AudioManager(parent=self)
 
-        # Internal State
+        # Internal State & Progression Lock
         self.current_round = 1
+        self.unlocked_rounds = {1: True, 2: False, 3: False}
         self.selected_clue = None
         self.selected_points = 200
         self.clue_buttons = {}
         self.board_cache = {}
-        self.category_names = [f"Chủ đề {i+1}" for i in range(6)]
+        self.category_names = [f"CATEGORY {i+1}" for i in range(6)]
+        self.intro_col_index = 0
 
         # Theme State
         self.theme = ThemeConfigManager.load_theme_xml()
@@ -790,11 +241,13 @@ class HostControllerWindow(QMainWindow):
         self.final_timer_seconds = 30
         self.final_timer.timeout.connect(self._on_final_timer_tick)
 
-        # Buzzer & 5-Second Countdown State
-        self.buzzer_locked = False
+        # Buzzer & 5-Second Countdown State (Lockout Timing)
+        self.buzzer_locked = True
         self.buzzer_active_player = None
+        self.excluded_buzzers = set()
         self.tv_answer_visible = False
         self.is_final_answer_visible = False
+        self._pending_dd_wager = None
         self.host_timer_5s = QTimer(self)
         self.host_timer_5s.setInterval(100)
         self.host_timer_5s.timeout.connect(self._on_host_timer_5s_tick)
@@ -802,6 +255,7 @@ class HostControllerWindow(QMainWindow):
 
         # Build UI
         self.setStyleSheet(APP_STYLE)
+        self._create_menu_bar()
         self._build_top_header()
         self._build_central_tabs()
         self._build_bottom_dock()
@@ -812,77 +266,247 @@ class HostControllerWindow(QMainWindow):
         self._load_final_jeopardy_data()
         self._refresh_database_table()
 
+    def _create_menu_bar(self):
+        """Standard broadcast menu bar."""
+        menu_bar = self.menuBar()
+        menu_bar.setStyleSheet("""
+            QMenuBar {
+                background-color: #161b22;
+                color: #c9d1d9;
+                font-weight: bold;
+                border-bottom: 1px solid #30363d;
+                padding: 2px 6px;
+            }
+            QMenuBar::item:selected {
+                background-color: #30363d;
+                color: #58a6ff;
+            }
+            QMenu {
+                background-color: #161b22;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                padding: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #1f6feb;
+                color: #ffffff;
+            }
+        """)
+
+        # 1. File Menu
+        menu_file = menu_bar.addMenu("File")
+
+        act_load_db = QAction("Load SQLite Database...", self)
+        act_load_db.triggered.connect(self._menu_load_db)
+        menu_file.addAction(act_load_db)
+
+        act_save_db = QAction("Save Database Changes", self)
+        act_save_db.triggered.connect(self._menu_save_db)
+        menu_file.addAction(act_save_db)
+
+        menu_file.addSeparator()
+
+        act_reset_game = QAction("Reset Match", self)
+        act_reset_game.triggered.connect(self._menu_reset_game)
+        menu_file.addAction(act_reset_game)
+
+        act_exit = QAction("Exit", self)
+        act_exit.triggered.connect(self.close)
+        menu_file.addAction(act_exit)
+
+        # 2. TV Display Menu
+        menu_tv = menu_bar.addMenu("TV Display")
+
+        act_open_tv = QAction("Open TV Display", self)
+        act_open_tv.triggered.connect(lambda: event_bus.toggle_tv_window.emit(True))
+        menu_tv.addAction(act_open_tv)
+
+        act_close_tv = QAction("Close TV Display", self)
+        act_close_tv.triggered.connect(lambda: event_bus.toggle_tv_window.emit(False))
+        menu_tv.addAction(act_close_tv)
+
+        act_toggle_fs = QAction("Toggle Fullscreen (F11)", self)
+        act_toggle_fs.setShortcut("F11")
+        act_toggle_fs.triggered.connect(lambda: event_bus.set_tv_fullscreen.emit())
+        menu_tv.addAction(act_toggle_fs)
+
+        act_secondary_screen = QAction("Move to Secondary Screen", self)
+        act_secondary_screen.triggered.connect(self._menu_move_tv_to_secondary)
+        menu_tv.addAction(act_secondary_screen)
+
+        # 3. Settings Menu
+        menu_settings = menu_bar.addMenu("Settings")
+
+        act_config = QAction("Visuals & Sound Settings...", self)
+        act_config.triggered.connect(self._open_settings_dialog)
+        menu_settings.addAction(act_config)
+
+        menu_perf = menu_settings.addMenu("Graphics Profile")
+        act_perf_basic = QAction("Power Saver (30 FPS)", self)
+        act_perf_basic.triggered.connect(lambda: self._set_perf_profile("basic"))
+        act_perf_smooth = QAction("Smooth (60 FPS)", self)
+        act_perf_smooth.triggered.connect(lambda: self._set_perf_profile("smooth"))
+        act_perf_ultra = QAction("Studio Max (OpenGL GPU)", self)
+        act_perf_ultra.triggered.connect(lambda: self._set_perf_profile("ultra"))
+        menu_perf.addAction(act_perf_basic)
+        menu_perf.addAction(act_perf_smooth)
+        menu_perf.addAction(act_perf_ultra)
+
+        menu_settings.addSeparator()
+
+        act_export_theme = QAction("Export Theme Package (.zip)...", self)
+        act_export_theme.triggered.connect(self._menu_export_theme_zip)
+        menu_settings.addAction(act_export_theme)
+
+        act_import_theme = QAction("Import Theme Package (.zip)...", self)
+        act_import_theme.triggered.connect(self._menu_import_theme_zip)
+        menu_settings.addAction(act_import_theme)
+
+    def _menu_load_db(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Load SQLite Database", "", "SQLite Database (*.db *.sqlite);;All Files (*)")
+        if f:
+            self.db_path = f
+            self.q_engine = QuestionEngine(self.db_path)
+            self._load_board_for_round(self.current_round)
+            self._load_final_jeopardy_data()
+            self._refresh_database_table()
+            QMessageBox.information(self, "Database Loaded", f"Successfully loaded database:\n{f}")
+
+    def _menu_save_db(self):
+        QMessageBox.information(self, "Database Saved", "All question data has been saved to SQLite database.")
+
+    def _menu_reset_game(self):
+        reply = QMessageBox.question(
+            self,
+            "Reset Match Confirmation",
+            "Are you sure you want to reset all scores and clue states to default?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self._reset_entire_game()
+
+    def _reset_entire_game(self):
+        self.q_engine.reset_session()
+        self.q_engine.reset_all_used()
+        if hasattr(self, "s_engine"):
+            self.s_engine.reset_scores()
+        for p in self.contestants.values():
+            p["score"] = 0
+        self.unlocked_rounds = {1: True, 2: False, 3: False}
+        self.current_round = 1
+        self._update_round_button_styles()
+        self._update_live_score_display()
+        self._load_board_for_round(1)
+        self._load_final_jeopardy_data()
+        self._reset_buzzers()
+        event_bus.reset_game_state.emit()
+        self.tabs.setCurrentIndex(0)
+        self.roster_status.setText("Status: Match reset. Ready to start.")
+        self.roster_status.setStyleSheet("color: #8b949e; font-style: italic;")
+
+    def _menu_move_tv_to_secondary(self):
+        screens = QApplication.screens()
+        if len(screens) > 1:
+            for win in QApplication.topLevelWidgets():
+                if win.__class__.__name__ == "TVDisplayWindow":
+                    win.setScreen(screens[1])
+                    win.showFullScreen()
+                    QMessageBox.information(self, "Secondary Display", f"TV Display moved to screen: {screens[1].name()}")
+                    return
+            QMessageBox.information(self, "Secondary Display", f"Found secondary screen: {screens[1].name()}")
+        else:
+            QMessageBox.warning(self, "Warning", "No secondary display connected to this system.")
+
+    def _set_perf_profile(self, profile: str):
+        self.theme["performance_profile"] = profile
+        event_bus.set_performance_profile.emit(profile)
+        QMessageBox.information(self, "Graphics Profile", f"Graphics profile set to: {profile}")
+
+    def _menu_export_theme_zip(self):
+        f, _ = QFileDialog.getSaveFileName(self, "Export Theme Package (.zip)", "broadcast_theme.zip", "Zip Packages (*.zip *.openj-theme);;All Files (*)")
+        if f:
+            try:
+                xml_path = str(PROJECT_ROOT / "ui" / "assets" / "theme.xml")
+                assets_dir = str(PROJECT_ROOT / "ui" / "assets")
+                ThemePackageEngine.export_theme_to_zip(xml_path, assets_dir, f)
+                QMessageBox.information(self, "Success", f"Theme package exported successfully:\n{f}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to export zip file: {e}")
+
+    def _menu_import_theme_zip(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Import Theme Package (.zip)", "", "Zip Packages (*.zip *.openj-theme);;All Files (*)")
+        if f:
+            try:
+                extract_to = str(PROJECT_ROOT / "ui" / "assets")
+                xml_path = ThemePackageEngine.import_theme_from_zip(f, extract_to)
+                self.theme = ThemeConfigManager.load_theme_xml(str(xml_path))
+                event_bus.reload_theme_config.emit()
+                event_bus.update_theme_config.emit(self.theme)
+                QMessageBox.information(self, "Success", "Theme package imported successfully! Visuals updated.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to import zip file: {e}")
+
+    def closeEvent(self, event):
+        reply = QMessageBox.question(
+            self,
+            "Exit Confirmation",
+            "Are you sure you want to close the Host Controller dashboard?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            event.accept()
+        else:
+            event.ignore()
+
     def _build_top_header(self):
+        """Unified, compact top ribbon consolidating Standby modes and Round coordination."""
         header_widget = QWidget()
         header_widget.setStyleSheet("background-color: #161b22; border-bottom: 1px solid #30363d;")
-        header_layout = QVBoxLayout(header_widget)
-        header_layout.setContentsMargins(16, 10, 16, 10)
-        header_layout.setSpacing(10)
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(16, 8, 16, 8)
+        header_layout.setSpacing(12)
 
-        # Row 1: Standby Controls & Settings
-        row1 = QHBoxLayout()
-        row1.setSpacing(10)
+        # Left branding
+        title_lbl = QLabel("OPEN-J | CONTROLLER")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: 900; color: #58a6ff; letter-spacing: 1px;")
+        header_layout.addWidget(title_lbl)
 
-        title_lbl = QLabel("OPEN-J | BROADCAST ENGINE")
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: 900; color: #58a6ff; letter-spacing: 1px;")
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.VLine)
+        sep1.setStyleSheet("color: #30363d;")
+        header_layout.addWidget(sep1)
 
-        self.btn_standby_normal = QPushButton("📺 Màn Hình Chờ Thường")
-        self.btn_standby_normal.setStyleSheet("""
+        # Commercial Break (Standby Waiting Screen) Controls
+        self._break_active = False
+        self.btn_commercial_break = QPushButton("COMMERCIAL BREAK (WAITING SCREEN)")
+        self.btn_commercial_break.setToolTip("Toggle commercial break waiting screen on TV display")
+        self.btn_commercial_break.setStyleSheet("""
             QPushButton {
                 background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-                font-weight: bold; padding: 6px 14px; border-radius: 6px;
+                font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
             }
-            QPushButton:hover { background-color: #30363d; border-color: #58a6ff; color: #58a6ff; }
+            QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
         """)
-        self.btn_standby_normal.clicked.connect(lambda: event_bus.trigger_standby_mode.emit("normal"))
+        self.btn_commercial_break.clicked.connect(self._on_toggle_commercial_break)
+        header_layout.addWidget(self.btn_commercial_break)
 
-        self.btn_standby_mosaic = QPushButton("🧩 Màn Hình Chờ Ghép Bảng")
-        self.btn_standby_mosaic.setStyleSheet("""
-            QPushButton {
-                background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-                font-weight: bold; padding: 6px 14px; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #30363d; border-color: #f59e0b; color: #f59e0b; }
-        """)
-        self.btn_standby_mosaic.clicked.connect(lambda: event_bus.trigger_standby_mode.emit("mosaic"))
+        header_layout.addStretch()
 
-        self.btn_standby_off = QPushButton("▶ Vào Trận Đấu / Tắt Chờ")
-        self.btn_standby_off.setStyleSheet("""
-            QPushButton {
-                background-color: #1f6feb; border: 1px solid #388bfd; color: #ffffff;
-                font-weight: bold; padding: 6px 14px; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #388bfd; }
-        """)
-        self.btn_standby_off.clicked.connect(lambda: event_bus.trigger_standby_mode.emit("off"))
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.VLine)
+        sep2.setStyleSheet("color: #30363d;")
+        header_layout.addWidget(sep2)
 
-        self.btn_settings = QPushButton("⚙ Cài đặt & Âm thanh")
-        self.btn_settings.setStyleSheet("""
-            QPushButton {
-                background-color: #21262d; border: 1px solid #30363d; color: #58a6ff;
-                font-weight: bold; padding: 6px 14px; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #30363d; border-color: #58a6ff; }
-        """)
-        self.btn_settings.clicked.connect(self._open_settings_dialog)
+        # Merged Round Ribbon (Round 1, Round 2, Round 3 in compact button group)
+        lbl_round_tag = QLabel("ROUND:")
+        lbl_round_tag.setStyleSheet("font-size: 11px; font-weight: 800; color: #8b949e;")
+        header_layout.addWidget(lbl_round_tag)
 
-        row1.addWidget(title_lbl)
-        row1.addStretch()
-        row1.addWidget(self.btn_standby_normal)
-        row1.addWidget(self.btn_standby_mosaic)
-        row1.addWidget(self.btn_standby_off)
-        row1.addWidget(self.btn_settings)
-
-        # Row 2: Segmented Round Buttons
-        row2 = QHBoxLayout()
-        row2.setSpacing(12)
-
-        lbl_round_tag = QLabel("ĐIỀU PHỐI VÒNG:")
-        lbl_round_tag.setStyleSheet("font-size: 13px; font-weight: 800; color: #8b949e;")
-
-        self.btn_round1 = QPushButton("[ 1. VÒNG 1: JEOPARDY ]")
-        self.btn_round2 = QPushButton("[ 2. VÒNG 2: DOUBLE JEOPARDY ]")
-        self.btn_round3 = QPushButton("[ 3. VÒNG FINAL JEOPARDY ]")
+        self.btn_round1 = QPushButton("[ 1. JEOPARDY! ]")
+        self.btn_round2 = QPushButton("[ 2. DOUBLE JEOPARDY! ]")
+        self.btn_round3 = QPushButton("[ 3. FINAL JEOPARDY! ]")
 
         for b in (self.btn_round1, self.btn_round2, self.btn_round3):
             b.setCursor(Qt.PointingHandCursor)
@@ -898,15 +522,36 @@ class HostControllerWindow(QMainWindow):
 
         self._update_round_button_styles()
 
-        row2.addWidget(lbl_round_tag)
-        row2.addWidget(self.btn_round1, 1)
-        row2.addWidget(self.btn_round2, 1)
-        row2.addWidget(self.btn_round3, 1)
-
-        header_layout.addLayout(row1)
-        header_layout.addLayout(row2)
+        header_layout.addWidget(self.btn_round1)
+        header_layout.addWidget(self.btn_round2)
+        header_layout.addWidget(self.btn_round3)
 
         self.header_widget = header_widget
+
+    def _on_toggle_commercial_break(self):
+        """Toggle commercial break standby screen on TV display."""
+        if not getattr(self, "_break_active", False):
+            self._break_active = True
+            event_bus.trigger_standby_mode.emit("normal")
+            self.btn_commercial_break.setText("RESUME GAMEPLAY (RETURN TO BOARD)")
+            self.btn_commercial_break.setStyleSheet("""
+                QPushButton {
+                    background-color: #238636; border: 1px solid #2ea043; color: #ffffff;
+                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                }
+                QPushButton:hover { background-color: #2ea043; }
+            """)
+        else:
+            self._break_active = False
+            event_bus.trigger_standby_mode.emit("off")
+            self.btn_commercial_break.setText("COMMERCIAL BREAK (WAITING SCREEN)")
+            self.btn_commercial_break.setStyleSheet("""
+                QPushButton {
+                    background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                }
+                QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
+            """)
 
     def _open_settings_dialog(self):
         dlg = SettingsDialog(self.theme, self.audio_manager, self)
@@ -926,10 +571,10 @@ class HostControllerWindow(QMainWindow):
         self.tab3 = self._build_tab3_final()
         self.tab4 = self._build_tab4_database()
 
-        self.tabs.addTab(self.tab1, "Tab 1: Chuẩn bị & Người chơi")
-        self.tabs.addTab(self.tab2, "Tab 2: Điều phối Vòng 1 & 2")
-        self.tabs.addTab(self.tab3, "Tab 3: Điều phối Vòng 3 (Final)")
-        self.tabs.addTab(self.tab4, "Tab 4: Quản lý CSDL (SQLite)")
+        self.tabs.addTab(self.tab1, "1. Pregame & Roster")
+        self.tabs.addTab(self.tab2, "2. Rounds 1 & 2 Board")
+        self.tabs.addTab(self.tab3, "3. Final Jeopardy")
+        self.tabs.addTab(self.tab4, "4. Database (SQLite)")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         c_layout.addWidget(self.tabs)
@@ -942,11 +587,11 @@ class HostControllerWindow(QMainWindow):
     def _build_tab1_pregame(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(18)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(14)
 
-        header = QLabel("THIẾT LẬP THÔNG TIN 3 NGƯỜI CHƠI (SEASON 40 & 41 STANDARD)")
-        header.setStyleSheet("font-size: 16px; font-weight: bold; color: #58a6ff;")
+        header = QLabel("CONTESTANT ROSTER SETUP (3 PODIUMS)")
+        header.setStyleSheet("font-size: 15px; font-weight: bold; color: #58a6ff;")
         layout.addWidget(header)
 
         cards_layout = QHBoxLayout()
@@ -954,19 +599,20 @@ class HostControllerWindow(QMainWindow):
         self.p_inputs = {}
 
         defaults = [
-            ("p1", "Người chơi 1 (Bục Trái)", "Ken Jennings", "Đương kim vô địch", 74, 2520700),
-            ("p2", "Người chơi 2 (Bục Giữa)", "Gold Ship", "Người chơi mới", 0, 0),
-            ("p3", "Người chơi 3 (Bục Phải)", "Agnes Tachyon", "Người chơi mới", 0, 0),
+            ("p1", "Podium 1 (Stage Left)", "Ken Jennings", "Returning Champion", 74, 2520700),
+            ("p2", "Podium 2 (Center)", "Gold Ship", "New Challenger", 0, 0),
+            ("p3", "Podium 3 (Stage Right)", "Agnes Tachyon", "New Challenger", 0, 0),
         ]
 
         for p_id, title, d_name, d_status, d_wins, d_prev in defaults:
             box = QGroupBox(title)
             b_layout = QFormLayout(box)
-            b_layout.setSpacing(12)
+            b_layout.setContentsMargins(14, 16, 14, 14)
+            b_layout.setSpacing(10)
 
             name_edit = QLineEdit(d_name)
             status_combo = QComboBox()
-            status_combo.addItems(["Người chơi mới", "Đương kim vô địch"])
+            status_combo.addItems(["Returning Champion", "New Challenger"])
             status_combo.setCurrentText(d_status)
 
             wins_spin = QSpinBox()
@@ -978,10 +624,10 @@ class HostControllerWindow(QMainWindow):
             prev_spin.setValue(d_prev)
             prev_spin.setPrefix("$ ")
 
-            b_layout.addRow("Tên người chơi:", name_edit)
-            b_layout.addRow("Trạng thái:", status_combo)
-            b_layout.addRow("Số ngày thắng:", wins_spin)
-            b_layout.addRow("Tiền tích lũy:", prev_spin)
+            b_layout.addRow("Contestant Name:", name_edit)
+            b_layout.addRow("Status:", status_combo)
+            b_layout.addRow("Consecutive Wins:", wins_spin)
+            b_layout.addRow("Career Earnings:", prev_spin)
 
             self.p_inputs[p_id] = {
                 "name": name_edit,
@@ -994,20 +640,21 @@ class HostControllerWindow(QMainWindow):
         layout.addLayout(cards_layout)
 
         btn_layout = QHBoxLayout()
-        self.btn_lock_roster = QPushButton(" [Khóa danh sách & Bắt đầu trận đấu]")
+        self.btn_lock_roster = QPushButton("[Lock Roster & Start Match]")
         self.btn_lock_roster.setStyleSheet("""
             QPushButton {
                 background-color: #238636;
                 color: white;
                 font-size: 14px;
                 font-weight: bold;
-                padding: 10px 20px;
+                padding: 10px 22px;
+                border-radius: 6px;
             }
             QPushButton:hover { background-color: #2ea043; }
         """)
         self.btn_lock_roster.clicked.connect(self._on_lock_roster)
 
-        self.roster_status = QLabel("Trạng thái: Sẵn sàng khóa danh sách.")
+        self.roster_status = QLabel("Status: Ready to lock roster.")
         self.roster_status.setStyleSheet("color: #8b949e; font-style: italic;")
 
         btn_layout.addWidget(self.btn_lock_roster)
@@ -1016,9 +663,32 @@ class HostControllerWindow(QMainWindow):
         layout.addLayout(btn_layout)
 
         layout.addStretch()
-        return widget
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background-color: transparent;")
+        scroll.setWidget(widget)
+        return scroll
 
     def _on_lock_roster(self):
+        # 1. Randomize and lock questions for this match in SQLite DB
+        DBManager().activate_game_categories()
+
+        # 2. Deactivate standby screen and ensure TV displays the live category board
+        self._break_active = False
+        if hasattr(self, "btn_commercial_break"):
+            self.btn_commercial_break.setText("COMMERCIAL BREAK (WAITING SCREEN)")
+            self.btn_commercial_break.setStyleSheet("""
+                QPushButton {
+                    background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                }
+                QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
+            """)
+        event_bus.trigger_standby_mode.emit("off")
+        
         player_names = []
         for p_id in ("p1", "p2", "p3"):
             info = self.p_inputs[p_id]
@@ -1032,15 +702,20 @@ class HostControllerWindow(QMainWindow):
         self._update_dock_player_labels()
         self._update_live_score_display()
 
+        # Data Snapshot Locking
+        self.q_engine.lock_session_data()
+        self._load_board_for_round(1)
+        self._load_final_jeopardy_data()
+
         event_bus.players_updated.emit(self.contestants)
         event_bus.score_updated.emit(self.s_engine.get_all_scores())
 
-        self.roster_status.setText("✓ Đã khóa danh sách & phát dữ liệu thành công!")
+        self.roster_status.setText("Roster locked & match started successfully!")
         self.roster_status.setStyleSheet("color: #3fb950; font-weight: bold;")
         self.tabs.setCurrentIndex(1)
 
     # =========================================================================
-    # TAB 2: ROUND 1 & 2 COORDINATION (FLEXIBLE STUDIO FX & AUTO/MANUAL INTRO)
+    # TAB 2: ROUND 1 & 2 COORDINATION
     # =========================================================================
 
     def _build_tab2_board(self):
@@ -1049,59 +724,50 @@ class HostControllerWindow(QMainWindow):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(12)
 
-        # KHU VỰC 1: Category Reveal Controls
-        cat_group = QGroupBox("KHU VỰC 1: ĐIỀU KHIỂN GIỚI THIỆU CHỦ ĐỀ (CATEGORY REVEAL CONTROLS)")
+        # CATEGORY REVEAL CONTROLS RIBBON
+        cat_group = QGroupBox("CATEGORY REVEAL & BOARD REVEAL")
         cat_layout = QHBoxLayout(cat_group)
         cat_layout.setContentsMargins(12, 10, 12, 10)
         cat_layout.setSpacing(10)
 
-        self.chk_auto_intro = QCheckBox(" Chạy Tự Động")
+        self.chk_auto_intro = QCheckBox(" Auto Sequence")
         self.chk_auto_intro.setChecked(False)
         self.chk_auto_intro.setVisible(False)
 
-        self.btn_cat_intro = QPushButton(" Intro Chủ Đề")
+        self.btn_cat_intro = QPushButton(" Intro Categories")
         self.btn_cat_intro.setVisible(False)
 
-        btn_blank = QPushButton(" Bảng Trống")
+        btn_blank = QPushButton("BLANK BOARD")
         btn_blank.setStyleSheet("background-color: #21262d; color: #c9d1d9; font-weight: bold; padding: 7px 12px;")
         btn_blank.clicked.connect(lambda: event_bus.trigger_board_blank.emit())
 
-        btn_fill = QPushButton(" Fill Ngẫu Nhiên")
+        btn_fill = QPushButton("RANDOM FILL")
         btn_fill.setStyleSheet("background-color: #21262d; color: #c9d1d9; font-weight: bold; padding: 7px 12px;")
         btn_fill.clicked.connect(lambda: event_bus.trigger_board_fill.emit())
 
-        self.btn_step0 = QPushButton(" 1. Mở Cột (Logo)")
-        self.btn_step0.setStyleSheet("background-color: #30363d; color: white; font-weight: bold; padding: 7px 12px;")
-        self.btn_step0.clicked.connect(self._on_cat_open_col)
+        self.btn_intro_sequence = QPushButton("START CATEGORY INTRO")
+        self.btn_intro_sequence.setToolTip("Sequentially open and reveal categories (3 steps per column)")
+        self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+        self.btn_intro_sequence.clicked.connect(self._on_intro_sequence_clicked)
+        
+        self.btn_cancel_intro = QPushButton("RETURN TO BOARD")
+        self.btn_cancel_intro.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+        self.btn_cancel_intro.clicked.connect(self._on_cat_cancel)
 
-        self.btn_step1 = QPushButton(" 2. Lộ Tên")
-        self.btn_step1.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 12px;")
-        self.btn_step1.clicked.connect(lambda: (event_bus.trigger_category_fade_logo.emit(), event_bus.trigger_category_reveal_step.emit(1)))
-
-        self.btn_next_cat = QPushButton(" 3. Trượt Tiếp >>")
-        self.btn_next_cat.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 7px 12px;")
-        self.btn_next_cat.clicked.connect(self._on_cat_slide_next)
-
-        self.btn_cancel_intro = QPushButton(" Về Bảng")
-        self.btn_cancel_intro.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 7px 12px;")
-        self.btn_cancel_intro.clicked.connect(lambda: event_bus.cancel_category_reveal.emit())
-
-        btn_obs_fs = QPushButton("📺 OBS: F11")
-        btn_obs_fs.setStyleSheet("background-color: #8957e5; color: white; font-weight: bold; padding: 7px 12px;")
+        btn_obs_fs = QPushButton("OBS: F11")
+        btn_obs_fs.setStyleSheet("background-color: #8957e5; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
         btn_obs_fs.clicked.connect(lambda: event_bus.set_display_fullscreen_toggle.emit())
 
         cat_layout.addWidget(btn_blank)
         cat_layout.addWidget(btn_fill)
-        cat_layout.addWidget(self.btn_step0)
-        cat_layout.addWidget(self.btn_step1)
-        cat_layout.addWidget(self.btn_next_cat)
+        cat_layout.addWidget(self.btn_intro_sequence)
         cat_layout.addWidget(self.btn_cancel_intro)
         cat_layout.addWidget(btn_obs_fs)
         cat_layout.addStretch()
 
         layout.addWidget(cat_group)
 
-        # KHU VỰC 2: Ma Trận 6x5 & Khung Soi Đáp Án + Đồng Hồ 5s + Lệnh 2 Bước
+        # 6x5 Board Matrix & Clue Peek / Broadcast Playout
         splitter = QSplitter(Qt.Horizontal)
 
         # Left: 6x5 Matrix Board
@@ -1115,7 +781,7 @@ class HostControllerWindow(QMainWindow):
 
         self.cat_headers = []
         for c in range(6):
-            lbl = QLabel(f"CHỦ ĐỀ {c+1}")
+            lbl = QLabel(f"CATEGORY {c+1}")
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setWordWrap(True)
             lbl.setStyleSheet("""
@@ -1152,7 +818,7 @@ class HostControllerWindow(QMainWindow):
         r_layout.setContentsMargins(14, 12, 14, 12)
         r_layout.setSpacing(10)
 
-        peek_lbl = QLabel("HOST SECRET PEEK BOX (SOI ĐÁP ÁN BÍ MẬT)")
+        peek_lbl = QLabel("CLUE & ANSWER PEEK (HOST ONLY)")
         peek_lbl.setStyleSheet("font-size: 13px; font-weight: bold; color: #f59e0b;")
         r_layout.addWidget(peek_lbl)
 
@@ -1164,8 +830,8 @@ class HostControllerWindow(QMainWindow):
         self._set_peek_placeholder()
         r_layout.addWidget(self.peek_text)
 
-        # Đồng Hồ Đếm Ngược Host 5 Giây
-        timer_box = QGroupBox("⏱ ĐỒNG HỒ HOST 5 GIÂY (BUZZER COUNTDOWN)")
+        # 5-Second Countdown
+        timer_box = QGroupBox("5S COUNTDOWN")
         tb_layout = QVBoxLayout(timer_box)
         tb_layout.setSpacing(6)
 
@@ -1174,11 +840,11 @@ class HostControllerWindow(QMainWindow):
         self.host_timer_lbl.setStyleSheet("font-size: 22px; font-weight: 900; color: #3fb950; font-family: monospace;")
         self.host_timer_lbl.setAlignment(Qt.AlignCenter)
 
-        self.btn_timer_start = QPushButton("▶ Bắt đầu 5s")
+        self.btn_timer_start = QPushButton("START 5S")
         self.btn_timer_start.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 5px 10px;")
         self.btn_timer_start.clicked.connect(self._start_host_timer_5s)
 
-        self.btn_timer_stop = QPushButton("⏹ Dừng / Reset 5s")
+        self.btn_timer_stop = QPushButton("CANCEL 5S")
         self.btn_timer_stop.setStyleSheet("background-color: #da3633; color: white; font-weight: bold; padding: 5px 10px;")
         self.btn_timer_stop.clicked.connect(self._reset_host_timer_5s)
 
@@ -1200,12 +866,12 @@ class HostControllerWindow(QMainWindow):
         tb_layout.addWidget(self.host_timer_bar)
         r_layout.addWidget(timer_box)
 
-        # Lệnh Phát Sóng 2 Bước Chuẩn
-        cmd_box = QGroupBox("LỆNH PHÁT SÓNG & ĐIỀU KHIỂN (2 BƯỚC)")
+        # 2-Step Broadcast Controls
+        cmd_box = QGroupBox("BROADCAST PLAYOUT (2 STEPS)")
         cb_layout = QVBoxLayout(cmd_box)
         cb_layout.setSpacing(7)
 
-        self.btn_display_clue = QPushButton("1. 🚀 [Bắn lên TV / Zoom Điểm]")
+        self.btn_display_clue = QPushButton("1. ZOOM POINT CELL / TV SPLASH")
         self.btn_display_clue.setStyleSheet("""
             QPushButton {
                 background-color: #1f6feb; color: white; font-weight: bold;
@@ -1215,7 +881,7 @@ class HostControllerWindow(QMainWindow):
         """)
         self.btn_display_clue.clicked.connect(self._on_display_clue_clicked)
 
-        self.btn_clue_reveal = QPushButton("2. 📋 [Xác nhận mở câu hỏi]")
+        self.btn_clue_reveal = QPushButton("2. REVEAL CLUE TEXT")
         self.btn_clue_reveal.setStyleSheet("""
             QPushButton {
                 background-color: #8957e5; color: white; font-weight: bold;
@@ -1225,7 +891,7 @@ class HostControllerWindow(QMainWindow):
         """)
         self.btn_clue_reveal.clicked.connect(self._on_clue_reveal_clicked)
 
-        self.btn_reveal_dd = QPushButton("★ [Mở nội dung câu hỏi Daily Double]")
+        self.btn_reveal_dd = QPushButton("[DAILY DOUBLE: ENTER WAGER & REVEAL]")
         self.btn_reveal_dd.setStyleSheet("""
             QPushButton {
                 background-color: #e11d48; color: white; font-weight: bold;
@@ -1236,7 +902,7 @@ class HostControllerWindow(QMainWindow):
         self.btn_reveal_dd.setVisible(False)
         self.btn_reveal_dd.clicked.connect(self._on_reveal_dd_clicked)
 
-        self.btn_toggle_answer = QPushButton("👁 [Hiện Đáp Án trên TV]")
+        self.btn_toggle_answer = QPushButton("TOGGLE TV ANSWER")
         self.btn_toggle_answer.setStyleSheet("""
             QPushButton {
                 background-color: #21262d; color: #8b949e; font-weight: bold;
@@ -1246,7 +912,7 @@ class HostControllerWindow(QMainWindow):
         """)
         self.btn_toggle_answer.clicked.connect(self._on_toggle_tv_answer_clicked)
 
-        self.btn_close_clue = QPushButton("↩ [Đóng câu hỏi / Quay về bảng]")
+        self.btn_close_clue = QPushButton("CLOSE CLUE / RETURN TO BOARD")
         self.btn_close_clue.setStyleSheet("""
             QPushButton {
                 background-color: #d29922; color: #0d1117; font-weight: bold;
@@ -1256,7 +922,7 @@ class HostControllerWindow(QMainWindow):
         """)
         self.btn_close_clue.clicked.connect(self._on_close_clue_clicked)
 
-        self.clue_status = QLabel("Trạng thái TV: Đang ở màn hình Bảng chính")
+        self.clue_status = QLabel("TV Status: Main Board active")
         self.clue_status.setStyleSheet("color: #8b949e; font-style: italic;")
 
         cb_layout.addWidget(self.btn_display_clue)
@@ -1277,52 +943,182 @@ class HostControllerWindow(QMainWindow):
         splitter.setStretchFactor(1, 35)
         layout.addWidget(splitter)
 
+        # Bottom round completion controls
+        finish_row = QHBoxLayout()
+        finish_row.addStretch()
+        self.btn_finish_round = QPushButton("COMPLETE ROUND 1 & UNLOCK ROUND 2")
+        self.btn_finish_round.setStyleSheet("""
+            QPushButton {
+                background-color: #238636;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 10px 24px;
+                border-radius: 6px;
+                border: 1px solid #2ea043;
+            }
+            QPushButton:hover { background-color: #2ea043; }
+        """)
+        self.btn_finish_round.setCursor(Qt.PointingHandCursor)
+        self.btn_finish_round.clicked.connect(self._on_finish_round_clicked)
+        finish_row.addWidget(self.btn_finish_round)
+        layout.addLayout(finish_row)
 
         return widget
 
-    def _on_auto_intro_toggled(self, checked):
-        if checked:
-            self.btn_cat_intro.setVisible(True)
-            self.btn_step0.setVisible(False)
-            self.btn_step1.setVisible(False)
-            self.btn_next_cat.setEnabled(False)
-            self.btn_next_cat.setVisible(False)
-        else:
-            self.btn_cat_intro.setVisible(False)
-            self.btn_step0.setVisible(True)
-            self.btn_step1.setVisible(True)
-            self.btn_next_cat.setEnabled(True)
-            self.btn_next_cat.setVisible(True)
+    def _on_intro_sequence_clicked(self):
+        """Single button logic for category intro sequence:
+        1. Show Category covered by Logo
+        2. Fade out Logo to reveal Category title
+        3. Slide to next Category (also covered by Logo)
+        ...
+        4. Complete & Return to Board
+        """
+        if not hasattr(self, "intro_seq_state"):
+            self.intro_seq_state = "SHOW"
+            self.intro_col_index = 0
+            
+        curr = self.intro_col_index
+        
+        if self.intro_seq_state == "SHOW":
+            event_bus.trigger_category_step.emit(1, curr)
+            self.btn_intro_sequence.setText(f"REVEAL CATEGORY {curr+1}")
+            self.btn_intro_sequence.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+            self.intro_seq_state = "REVEAL"
+            
+        elif self.intro_seq_state == "REVEAL":
+            event_bus.trigger_category_step.emit(2, curr)
+            if curr < 5:
+                self.btn_intro_sequence.setText(f"SLIDE TO CATEGORY {curr+2} (LOGO)")
+                self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+                self.intro_seq_state = "SLIDE"
+            else:
+                self.btn_intro_sequence.setText("COMPLETE & RETURN TO BOARD")
+                self.btn_intro_sequence.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+                self.intro_seq_state = "RETURN"
+                
+        elif self.intro_seq_state == "SLIDE":
+            self.intro_col_index += 1
+            nxt = self.intro_col_index
+            event_bus.trigger_category_step.emit(3, nxt)
+            self.btn_intro_sequence.setText(f"REVEAL CATEGORY {nxt+1}")
+            self.btn_intro_sequence.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+            self.intro_seq_state = "REVEAL"
+            
+        elif self.intro_seq_state == "RETURN":
+            self._on_cat_cancel()
 
-    def _on_cat_open_col(self):
+    def _on_cat_cancel(self):
         self.intro_col_index = 0
-        event_bus.trigger_category_show_logo.emit(0)
-        event_bus.trigger_category_reveal_step.emit(0)
+        self.intro_seq_state = "SHOW"
+        if hasattr(self, "btn_intro_sequence"):
+            self.btn_intro_sequence.setText("START CATEGORY INTRO")
+            self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+        event_bus.trigger_category_step.emit(4, 0)
+        event_bus.cancel_category_reveal.emit()
+    def _on_cat_open_col(self):
+        """Backward compatibility alias for opening category column 0."""
+        self._on_open_categories_clicked()
+
+    def _on_cat_fade_logo(self):
+        """Backward compatibility alias for fading category logo."""
+        curr = getattr(self, "intro_col_index", 0)
+        if hasattr(self, "cat_revealed_flags") and curr < len(self.cat_revealed_flags):
+            self.cat_revealed_flags[curr] = True
+        event_bus.trigger_category_step.emit(2, curr)
+        event_bus.trigger_category_fade_logo.emit()
+        event_bus.trigger_category_reveal_step.emit(1)
 
     def _on_cat_slide_next(self):
-        event_bus.trigger_category_slide_next.emit()
-        event_bus.trigger_category_reveal_step.emit(2)
+        """Backward compatibility alias for sliding to next category."""
+        curr = getattr(self, "intro_col_index", 0)
+        if curr < 5:
+            self.intro_col_index = curr + 1
+            nxt = self.intro_col_index
+            if hasattr(self, "cat_revealed_flags") and nxt < len(self.cat_revealed_flags):
+                self.cat_revealed_flags[nxt] = True
+            event_bus.trigger_category_step.emit(3, nxt)
+            event_bus.trigger_category_slide_next.emit()
+            event_bus.trigger_category_reveal_step.emit(2)
+        else:
+            self._on_cat_cancel()
 
-    def _on_intro_clicked(self):
-        is_auto = self.chk_auto_intro.isChecked()
-        event_bus.trigger_category_reveal.emit({"auto": is_auto, "step": 0, "col_index": 0})
+    def _on_finish_round_clicked(self):
+        if self.current_round == 1:
+            reply = QMessageBox.question(
+                self,
+                "Confirm Round 1 Completion",
+                "Are you sure you want to conclude Round 1 and unlock Round 2 (Double Jeopardy)?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.unlocked_rounds[2] = True
+                self.btn_finish_round.setText("COMPLETE ROUND 2 & UNLOCK FINAL JEOPARDY")
+                self._update_round_button_styles()
+                self._on_round_button_clicked(2)
+                event_bus.unlock_round.emit(2)
+        elif self.current_round == 2:
+            reply = QMessageBox.question(
+                self,
+                "Confirm Round 2 Completion",
+                "Are you sure you want to conclude Round 2 and unlock Round 3 (Final Jeopardy)?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.unlocked_rounds[3] = True
+                self.btn_finish_round.setText("ALL ROUNDS COMPLETED")
+                self.btn_finish_round.setEnabled(False)
+                self.btn_finish_round.setStyleSheet("background-color: #21262d; color: #8b949e; font-size: 14px; font-weight: bold; padding: 10px 24px; border-radius: 6px; border: 1px solid #30363d;")
+                self._update_round_button_styles()
+                self._on_round_button_clicked(3)
+                event_bus.unlock_round.emit(3)
 
     def _update_round_button_styles(self):
         active = (
             "background-color: #1f6feb; color: #ffffff; font-weight: 900; "
-            "border: 2px solid #FFD700; padding: 7px 18px; border-radius: 6px; font-size: 13px;"
+            "border: 2px solid #FFD700; padding: 6px 16px; border-radius: 6px; font-size: 12px;"
         )
         inactive = (
-            "background-color: #21262d; color: #8b949e; font-weight: bold; "
-            "border: 1px solid #30363d; padding: 7px 18px; border-radius: 6px; font-size: 13px;"
+            "background-color: #21262d; color: #c9d1d9; font-weight: bold; "
+            "border: 1px solid #30363d; padding: 6px 16px; border-radius: 6px; font-size: 12px;"
         )
-        self.btn_round1.setStyleSheet(active if self.current_round == 1 else inactive)
-        self.btn_round2.setStyleSheet(active if self.current_round == 2 else inactive)
-        self.btn_round3.setStyleSheet(active if self.current_round == 3 else inactive)
+        locked = (
+            "background-color: #161b22; color: #484f58; font-weight: bold; "
+            "border: 1px solid #21262d; padding: 6px 16px; border-radius: 6px; font-size: 12px;"
+        )
+        rounds = [(1, self.btn_round1), (2, self.btn_round2), (3, self.btn_round3)]
+        for rid, btn in rounds:
+            is_unlocked = self.unlocked_rounds.get(rid, False)
+            btn.setEnabled(is_unlocked)
+            if not is_unlocked:
+                btn.setStyleSheet(locked)
+            elif self.current_round == rid:
+                btn.setStyleSheet(active)
+            else:
+                btn.setStyleSheet(inactive)
 
     def _on_round_button_clicked(self, round_id):
+        if not self.unlocked_rounds.get(round_id, False):
+            QMessageBox.warning(self, "Round Locked", f"Round {round_id} is locked! Please complete the preceding round first.")
+            return
         self.current_round = round_id
         self._update_round_button_styles()
+
+        # Turn off commercial break / standby screen when entering round
+        self._break_active = False
+        if hasattr(self, "btn_commercial_break"):
+            self.btn_commercial_break.setText("COMMERCIAL BREAK (WAITING SCREEN)")
+            self.btn_commercial_break.setStyleSheet("""
+                QPushButton {
+                    background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                }
+                QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
+            """)
+        event_bus.trigger_standby_mode.emit("off")
+
         if round_id in (1, 2):
             self.tabs.setCurrentIndex(1)
             event_bus.change_round.emit(round_id)
@@ -1330,6 +1126,7 @@ class HostControllerWindow(QMainWindow):
         elif round_id == 3:
             self.tabs.setCurrentIndex(2)
             event_bus.change_round.emit(3)
+            self._refresh_final_wagers_ui()
 
     def _on_tab_changed(self, index):
         if index == 1:
@@ -1337,13 +1134,18 @@ class HostControllerWindow(QMainWindow):
                 self.current_round = 1
             self._update_round_button_styles()
         elif index == 2:
+            if not self.unlocked_rounds.get(3, False):
+                QMessageBox.warning(self, "Round Locked", "Round 3 (Final Jeopardy) is locked! Please complete Rounds 1 & 2 first.")
+                self.tabs.setCurrentIndex(1 if self.unlocked_rounds.get(2, False) else 0)
+                return
             self.current_round = 3
             self._update_round_button_styles()
+            self._refresh_final_wagers_ui()
 
     def _set_peek_placeholder(self):
         self.peek_text.setHtml(
-            "<div style='color: #8b949e; font-style: italic; text-align: center; margin-top: 60px;'>"
-            "<i>Nhấp chọn một ô điểm trên bảng ma trận để soi trước câu hỏi, đáp án đúng và tình trạng ảnh...</i>"
+            "<div style='color: #8b949e; font-style: italic; text-align: center; margin-top: 40px;'>"
+            "<i>Click any board point cell to peek question, answer, and visual asset status...</i>"
             "</div>"
         )
 
@@ -1354,25 +1156,19 @@ class HostControllerWindow(QMainWindow):
 
         base_multiplier = 200 if round_id == 1 else 400
 
-        with self._get_db_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM questions WHERE round_id = ? ORDER BY col_index, row_index", (round_id,))
-            rows = cursor.fetchall()
-
-        for row in rows:
-            d = dict(row)
-            c, r = d["col_index"], d["row_index"]
-            if 0 <= c < 6 and 0 <= r < 5:
-                self.board_cache[(c, r)] = d
-
+        categories = self.q_engine.get_categories_for_round(round_id)
         for c in range(6):
-            cat_name = f"CHỦ ĐỀ {c+1}"
-            for r in range(5):
-                if (c, r) in self.board_cache:
-                    cat_name = self.board_cache[(c, r)]["category_name"].upper()
-                    break
+            cat_name = categories[c].upper() if c < len(categories) else f"CATEGORY {c+1}"
             self.cat_headers[c].setText(cat_name)
 
+        board_rows = self.q_engine.get_board_by_round(round_id)
+        for row_data in board_rows:
+            c, r = row_data["col_index"], row_data["row_index"]
+            if 0 <= c < 6 and 0 <= r < 5:
+                full_q = self.q_engine.get_question(round_id, c, r)
+                self.board_cache[(c, r)] = full_q if full_q else row_data
+
+        board_items = []
         for r in range(5):
             expected_pts = (r + 1) * base_multiplier
             for c in range(6):
@@ -1384,6 +1180,18 @@ class HostControllerWindow(QMainWindow):
 
                 btn.setText(f"[DD] ${pts}" if is_dd else f"${pts}")
                 self._apply_clue_button_style(btn, is_used=is_used, is_selected=False, is_dd=is_dd)
+
+                board_items.append({
+                    "col_index": c,
+                    "row_index": r,
+                    "points": pts,
+                    "is_used": is_used,
+                    "is_daily_double": is_dd,
+                })
+
+        cat_names = [self.cat_headers[c].text() for c in range(6)]
+        event_bus.sync_categories_to_tv.emit(cat_names)
+        event_bus.sync_board_state_to_tv.emit(board_items)
 
     def _apply_clue_button_style(self, btn, is_used=False, is_selected=False, is_dd=False):
         if is_used:
@@ -1416,8 +1224,8 @@ class HostControllerWindow(QMainWindow):
                 "row_index": row,
                 "category_name": self.cat_headers[col].text(),
                 "points": base_pts,
-                "question_text": f"(Chưa có nội dung câu hỏi cho ô Cột {col+1}, Hàng {row+1})",
-                "answer_text": "(Chưa có đáp án)",
+                "question_text": f"(No question content for Col {col+1}, Row {row+1})",
+                "answer_text": "(No answer)",
                 "asset_filename": "",
                 "is_daily_double": 0,
                 "is_used": 0,
@@ -1430,34 +1238,34 @@ class HostControllerWindow(QMainWindow):
         asset_fn = curr_clue.get("asset_filename", "")
         asset_p = Path("ui/assets/image") / asset_fn if asset_fn else None
         has_asset = bool(asset_fn and asset_p.exists())
-        asset_desc = f"<span style='color:#3fb950;'>✓ Có ảnh ({asset_fn})</span>" if has_asset else "<span style='color:#8b949e;'>Chỉ text</span>"
-        dd_badge = "<span style='background-color:#da3633; color:white; padding:2px 6px; border-radius:3px; font-weight:bold;'>CÓ (DAILY DOUBLE!)</span>" if curr_clue["is_daily_double"] else "<span style='color:#8b949e;'>Không</span>"
+        asset_desc = f"<span style='color:#3fb950;'>Asset Available ({asset_fn})</span>" if has_asset else "<span style='color:#8b949e;'>Text Only</span>"
+        dd_badge = "<span style='background-color:#da3633; color:white; padding:2px 6px; border-radius:3px; font-weight:bold;'>YES (DAILY DOUBLE!)</span>" if curr_clue["is_daily_double"] else "<span style='color:#8b949e;'>No</span>"
 
         html = f"""
         <div style="font-family: Arial, sans-serif;">
             <p style="margin: 0 0 6px 0; font-size: 14px;">
-                <b>Chủ đề:</b> <span style="color: #58a6ff; font-weight: bold;">{curr_clue['category_name']}</span>
+                <b>Category:</b> <span style="color: #58a6ff; font-weight: bold;">{curr_clue['category_name']}</span>
             </p>
             <p style="margin: 0 0 8px 0; font-size: 13px;">
-                <b>Mức điểm:</b> <span style="color: #f59e0b; font-weight: bold;">${curr_clue['points']}</span> &nbsp;|&nbsp; 
+                <b>Points:</b> <span style="color: #f59e0b; font-weight: bold;">${curr_clue['points']}</span> &nbsp;|&nbsp; 
                 <b>Daily Double:</b> {dd_badge}
             </p>
             <div style="background-color: #0b1354; border-left: 4px solid #1f6feb; padding: 8px; border-radius: 4px; margin-bottom: 8px;">
-                <b style="color: #58a6ff;">Nội dung câu hỏi (Clue):</b><br/>
+                <b style="color: #58a6ff;">Clue:</b><br/>
                 <span style="font-size: 14px; color: #ffffff;">{curr_clue['question_text']}</span>
             </div>
             <div style="background-color: #0e2a1b; border-left: 4px solid #238636; padding: 8px; border-radius: 4px; margin-bottom: 8px;">
-                <b style="color: #3fb950;">Đáp án đúng (Host Only):</b><br/>
+                <b style="color: #3fb950;">Correct Answer (Host Only):</b><br/>
                 <span style="font-size: 15px; font-weight: bold; color: #3fb950;">{curr_clue['answer_text']}</span>
             </div>
-            <p style="margin: 2px 0 0 0; font-size: 12px;"><b>Tình trạng Asset:</b> {asset_desc}</p>
+            <p style="margin: 2px 0 0 0; font-size: 12px;"><b>Visual Asset:</b> {asset_desc}</p>
         </div>
         """
         self.peek_text.setHtml(html)
 
     def _on_display_clue_clicked(self):
         if not self.selected_clue:
-            QMessageBox.warning(self, "Chưa chọn câu hỏi", "Vui lòng chọn 1 ô trên bảng trước!")
+            QMessageBox.warning(self, "No Clue Selected", "Please select a point cell on the board first!")
             return
 
         payload = dict(self.selected_clue)
@@ -1466,22 +1274,20 @@ class HostControllerWindow(QMainWindow):
         payload["has_asset"] = bool(asset_fn and asset_path and asset_path.exists())
         payload["asset_path"] = str(asset_path.resolve()) if payload["has_asset"] else ""
 
-        # Step 1: Kích hoạt Zoom ô điểm số hoặc Daily Double Splash trên TV
         event_bus.trigger_clue_zoom.emit(payload)
         event_bus.request_clue_zoom.emit(payload)
 
-        # Reset TV answer overlay
         self.tv_answer_visible = False
-        self.btn_toggle_answer.setText("👁 [Hiện Đáp Án trên TV]")
+        self.btn_toggle_answer.setText("TOGGLE TV ANSWER")
         self.btn_toggle_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; font-size: 13px; padding: 8px; border: 1px solid #30363d;")
 
         if payload.get("is_daily_double"):
-            self.clue_status.setText("★ DAILY DOUBLE! Đang phóng to điểm và bung Splash. Bấm '2. Xác nhận mở câu hỏi' để hiện nội dung.")
+            self.clue_status.setText("DAILY DOUBLE! Zooming point tile. Click '2. Reveal Clue Text' to show question.")
             self.clue_status.setStyleSheet("color: #f59e0b; font-weight: bold;")
             self.btn_reveal_dd.setVisible(True)
         else:
             self.btn_reveal_dd.setVisible(False)
-            self.clue_status.setText(f"✓ Đang phóng to ô điểm trên TV [{payload['category_name']} ${payload['points']}]. Bấm '2. Xác nhận mở câu hỏi' để hiện thẻ câu hỏi.")
+            self.clue_status.setText(f"Zooming point tile on TV [{payload['category_name']} ${payload['points']}]. Click '2. Reveal Clue Text' to show clue card.")
             self.clue_status.setStyleSheet("color: #3fb950; font-weight: bold;")
 
     def _on_clue_reveal_clicked(self):
@@ -1496,10 +1302,46 @@ class HostControllerWindow(QMainWindow):
         event_bus.trigger_clue_reveal.emit()
         event_bus.display_question.emit(payload)
         self.btn_reveal_dd.setVisible(False)
-        self.clue_status.setText("✓ Đã mở nội dung câu hỏi lên TV!")
+        self.clue_status.setText("Clue card active on TV!")
         self.clue_status.setStyleSheet("color: #3fb950; font-weight: bold;")
 
+        self.buzzer_locked = True
+        self.excluded_buzzers.clear()
+        self.buzzer_active_player = None
+        self._update_buzzer_lockout_ui()
+        event_bus.set_buzzer_lockout.emit(True)
+
     def _on_reveal_dd_clicked(self):
+        if not self.selected_clue:
+            return
+
+        p_id = self.buzzer_active_player or "p1"
+        p_name = self.contestants[p_id]["name"]
+        score = self.contestants[p_id]["score"]
+        round_id = self.current_round
+        ceiling = 1000 if round_id == 1 else 2000
+        max_wager = max(score, ceiling)
+
+        wager, ok = QInputDialog.getInt(
+            self,
+            f"DAILY DOUBLE — {p_name}",
+            f"Enter wager (min=$5, max=${max_wager}):\n"
+            f"Current Score: ${score} | Round {round_id} Ceiling: ${ceiling}",
+            value=min(score, ceiling),
+            min=5,
+            max=max_wager,
+            step=100
+        )
+        if not ok:
+            return
+
+        is_valid, err_msg = self.s_engine.validate_dd_wager(p_id, wager, round_id)
+        if not is_valid:
+            QMessageBox.warning(self, "Invalid Wager", err_msg)
+            return
+
+        self._pending_dd_wager = {"player_id": p_id, "wager": wager}
+        self.clue_status.setText(f"DD: {p_name} wagered ${wager}. Revealing question...")
         self._on_clue_reveal_clicked()
 
     def _on_toggle_tv_answer_clicked(self):
@@ -1509,10 +1351,10 @@ class HostControllerWindow(QMainWindow):
         ans_text = self.selected_clue.get("answer_text", "")
         event_bus.toggle_tv_answer.emit(self.tv_answer_visible, ans_text)
         if self.tv_answer_visible:
-            self.btn_toggle_answer.setText("👁 [Ẩn Đáp Án trên TV]")
+            self.btn_toggle_answer.setText("HIDE TV ANSWER")
             self.btn_toggle_answer.setStyleSheet("background-color: #238636; color: white; font-weight: bold; font-size: 13px; padding: 8px; border: 1px solid #3fb950;")
         else:
-            self.btn_toggle_answer.setText("👁 [Hiện Đáp Án trên TV]")
+            self.btn_toggle_answer.setText("TOGGLE TV ANSWER")
             self.btn_toggle_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; font-size: 13px; padding: 8px; border: 1px solid #30363d;")
 
     def _on_close_clue_clicked(self):
@@ -1524,9 +1366,7 @@ class HostControllerWindow(QMainWindow):
         row = self.selected_clue["row_index"]
 
         if clue_id:
-            with self._get_db_conn() as conn:
-                conn.cursor().execute("UPDATE questions SET is_used = 1 WHERE id = ?", (clue_id,))
-                conn.commit()
+            self.q_engine.mark_as_used(clue_id)
 
         self.selected_clue["is_used"] = 1
         if (col, row) in self.board_cache:
@@ -1535,18 +1375,15 @@ class HostControllerWindow(QMainWindow):
         btn = self.clue_buttons[(col, row)]
         self._apply_clue_button_style(btn, is_used=True, is_selected=False, is_dd=bool(self.selected_clue.get("is_daily_double")))
 
-        # Reset TV answer overlay
         self.tv_answer_visible = False
-        self.btn_toggle_answer.setText("👁 [Hiện Đáp Án trên TV]")
+        self.btn_toggle_answer.setText("TOGGLE TV ANSWER")
         self.btn_toggle_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; font-size: 13px; padding: 8px; border: 1px solid #30363d;")
         event_bus.toggle_tv_answer.emit(False, "")
 
-        # Close clue on TV
         event_bus.close_question.emit()
-        self.clue_status.setText("Trạng thái TV: Đã đóng câu hỏi. Trở về bảng.")
+        self.clue_status.setText("TV Status: Clue closed. Returned to board.")
         self.clue_status.setStyleSheet("color: #8b949e; font-style: italic;")
 
-        # Auto-reset buzzers and stop 5s timer
         self._reset_buzzers()
 
     # =========================================================================
@@ -1554,16 +1391,17 @@ class HostControllerWindow(QMainWindow):
     # =========================================================================
 
     def _build_tab3_final(self):
+        """Final Jeopardy Sequencer following official broadcast rules & reference images 11-14."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(14)
 
         top_row = QHBoxLayout()
-        header = QLabel("ĐIỀU PHỐI VÒNG 3: FINAL JEOPARDY! SEQUENCER")
+        header = QLabel("ROUND 3: FINAL JEOPARDY! SEQUENCER")
         header.setStyleSheet("font-size: 16px; font-weight: bold; color: #58a6ff;")
 
-        self.chk_manual_override = QCheckBox(" Bật Chế Độ Nhập Thủ Công (Manual Override)")
+        self.chk_manual_override = QCheckBox(" Enable Manual Override")
         self.chk_manual_override.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 13px;")
         self.chk_manual_override.toggled.connect(self._on_manual_override_toggled)
 
@@ -1576,64 +1414,122 @@ class HostControllerWindow(QMainWindow):
         self.manual_frame.setStyleSheet("background-color: #1c2128; border: 1px solid #f59e0b; border-radius: 6px; padding: 8px;")
         mf_layout = QFormLayout(self.manual_frame)
         self.edit_cat = QLineEdit()
-        self.edit_cat.setPlaceholderText("Nhập tên chủ đề Final...")
+        self.edit_cat.setPlaceholderText("Enter Final Category...")
         self.edit_clue = QLineEdit()
-        self.edit_clue.setPlaceholderText("Nhập nội dung manh mối Final...")
+        self.edit_clue.setPlaceholderText("Enter Final Clue text...")
         self.edit_ans = QLineEdit()
-        self.edit_ans.setPlaceholderText("Nhập đáp án đúng...")
-        mf_layout.addRow("Chủ đề thủ công:", self.edit_cat)
-        mf_layout.addRow("Manh mối thủ công:", self.edit_clue)
-        mf_layout.addRow("Đáp án thủ công:", self.edit_ans)
+        self.edit_ans.setPlaceholderText("Enter correct answer...")
+        mf_layout.addRow("Manual Category:", self.edit_cat)
+        mf_layout.addRow("Manual Clue:", self.edit_clue)
+        mf_layout.addRow("Manual Answer:", self.edit_ans)
         self.manual_frame.setVisible(False)
         layout.addWidget(self.manual_frame)
 
-        # Step 1: Splash Logo Final
-        self.step1_box = QGroupBox("BƯỚC 1: HIỂN THỊ LOGO SPLASH VÒNG FINAL")
+        # STEP 1: Final Logo Splash (Image 11)
+        self.step1_box = QGroupBox("STEP 1: DISPLAY FINAL JEOPARDY LOGO SPLASH")
+        self.step1_box.setMinimumHeight(90)
         s1_layout = QVBoxLayout(self.step1_box)
-        self.btn_show_splash = QPushButton(" [1. Mở Splash Logo Final]")
+        self.btn_show_splash = QPushButton("[1. Show Final Splash Logo]")
         self.btn_show_splash.setStyleSheet("background-color: #8957e5; color: white; font-weight: bold; padding: 8px;")
         self.btn_show_splash.clicked.connect(self._on_show_splash)
         s1_layout.addWidget(self.btn_show_splash)
         layout.addWidget(self.step1_box)
 
-        # Step 2: Category & Wagers
-        self.step2_box = QGroupBox("BƯỚC 2: CÔNG BỐ CHỦ ĐỀ & KHÓA CƯỢC 3 NGƯỜI CHƠI")
+        # STEP 2: Category & Wager Entry (Image 12)
+        # Allows host to switch between Category and Logo Splash while wagers are entered and locked
+        self.step2_box = QGroupBox("STEP 2: ANNOUNCE CATEGORY & ENTER WAGERS")
+        self.step2_box.setMinimumHeight(240)
         s2_layout = QVBoxLayout(self.step2_box)
 
-        self.final_cat_lbl = QLabel("Chủ đề Final: Đang nạp từ CSDL...")
+        cat_ctrl_row = QHBoxLayout()
+        self.final_cat_lbl = QLabel("Final Category: Loading from database...")
         self.final_cat_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #f59e0b;")
-        s2_layout.addWidget(self.final_cat_lbl)
+
+        self.btn_show_category_tv = QPushButton("[Show Category on TV]")
+        self.btn_show_category_tv.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 6px 14px;")
+        self.btn_show_category_tv.clicked.connect(self._on_show_category_tv)
+
+        self.btn_return_splash_tv = QPushButton("[Return TV to Splash Logo]")
+        self.btn_return_splash_tv.setStyleSheet("background-color: #30363d; color: #c9d1d9; font-weight: bold; padding: 6px 14px;")
+        self.btn_return_splash_tv.clicked.connect(self._on_show_splash)
+
+        cat_ctrl_row.addWidget(self.final_cat_lbl, 1)
+        cat_ctrl_row.addWidget(self.btn_show_category_tv)
+        cat_ctrl_row.addWidget(self.btn_return_splash_tv)
+        s2_layout.addLayout(cat_ctrl_row)
 
         w_layout = QHBoxLayout()
         self.wager_spins = {}
         self.wager_notes = {}
+        self.wager_name_labels = {}
         for p_id in ("p1", "p2", "p3"):
             box = QFrame()
-            box.setStyleSheet("background-color: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px;")
+            box.setMinimumHeight(140)
+            box.setObjectName(f"wager_card_{p_id}")
+            box.setStyleSheet(f"""
+                QFrame#wager_card_{p_id} {{
+                    background-color: #161b22;
+                    border: 1px solid #30363d;
+                    border-radius: 8px;
+                    padding: 10px;
+                }}
+            """)
             b_lay = QVBoxLayout(box)
+            b_lay.setSpacing(6)
             name_lbl = QLabel(self.contestants[p_id]["name"])
-            name_lbl.setStyleSheet("font-weight: bold; color: #58a6ff;")
-            note = QLabel("Điểm: $0")
-            note.setStyleSheet("color: #8b949e; font-size: 12px;")
+            name_lbl.setStyleSheet("font-size: 14px; font-weight: 800; color: #58a6ff;")
+            self.wager_name_labels[p_id] = name_lbl
+
+            note = QLabel("Score: $0 (Max Wager: $1000)")
+            note.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: bold;")
+            self.wager_notes[p_id] = note
+
             spin = QSpinBox()
-            spin.setRange(0, 100000)
-            spin.setPrefix("Cược: $ ")
+            spin.setRange(0, 1000)
+            spin.setSingleStep(100)
+            spin.setPrefix("$ ")
+            spin.setStyleSheet("""
+                QSpinBox {
+                    background-color: #0d1117;
+                    color: #ffffff;
+                    border: 1px solid #30363d;
+                    border-radius: 6px;
+                    padding: 6px 10px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    min-height: 36px;
+                }
+                QSpinBox:focus {
+                    border: 1px solid #58a6ff;
+                }
+            """)
             b_lay.addWidget(name_lbl)
             b_lay.addWidget(note)
             b_lay.addWidget(spin)
             w_layout.addWidget(box)
             self.wager_spins[p_id] = spin
-            self.wager_notes[p_id] = note
+
         s2_layout.addLayout(w_layout)
 
-        self.btn_lock_wagers = QPushButton(" [2. Công Bố Chủ Đề & Khóa Cược]")
-        self.btn_lock_wagers.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 8px;")
+        self.btn_lock_wagers = QPushButton("[Lock Wagers & Proceed to Clue]")
+        self.btn_lock_wagers.setStyleSheet("""
+            QPushButton {
+                background-color: #238636;
+                color: white;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 10px;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #2ea043; }
+        """)
         self.btn_lock_wagers.clicked.connect(self._on_lock_wagers)
         s2_layout.addWidget(self.btn_lock_wagers)
         layout.addWidget(self.step2_box)
 
-        # Step 3: Clue & 30s Countdown
-        self.step3_box = QGroupBox("BƯỚC 3: HIỂN THỊ MANH MỐI & PHÁT THINK MUSIC (30S)")
+        # STEP 3: Reveal Clue & 30-Second Think Music (Images 13 & 14)
+        self.step3_box = QGroupBox("STEP 3: REVEAL FINAL CLUE & 30-SECOND THINK MUSIC")
+        self.step3_box.setMinimumHeight(180)
         self.step3_box.setEnabled(False)
         s3_layout = QVBoxLayout(self.step3_box)
 
@@ -1643,67 +1539,111 @@ class HostControllerWindow(QMainWindow):
         s3_layout.addWidget(self.final_clue_preview)
 
         t_layout = QHBoxLayout()
-        self.btn_start_30s = QPushButton(" [3. Mở Manh Mối & Bắt Đầu 30s]")
+        self.btn_start_30s = QPushButton("3. REVEAL CLUE & START 30S")
         self.btn_start_30s.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 8px 16px;")
         self.btn_start_30s.clicked.connect(self._on_start_30s)
 
-        self.btn_stop_30s = QPushButton(" [Dừng khẩn cấp]")
-        self.btn_stop_30s.setStyleSheet("background-color: #da3633; color: white; font-weight: bold; padding: 8px 16px;")
+        self.btn_restart_final = QPushButton("RESTART 30S TIMER")
+        self.btn_restart_final.setToolTip("Rewind Think Music to 0:00, reset timer to 30s, and re-arm 15s red cross-fade")
+        self.btn_restart_final.setStyleSheet("""
+            QPushButton {
+                background-color: #0284c7; color: white; font-weight: bold; padding: 8px 16px; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #0369a1; }
+            QPushButton:disabled { background-color: #21262d; color: #484f58; }
+        """)
+        self.btn_restart_final.setEnabled(False)
+        self.btn_restart_final.clicked.connect(self._on_restart_30s)
+
+        self.btn_stop_30s = QPushButton("EMERGENCY STOP")
+        self.btn_stop_30s.setStyleSheet("""
+            QPushButton {
+                background-color: #da3633; color: white; font-weight: bold; padding: 8px 16px; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #f85149; }
+            QPushButton:disabled { background-color: #21262d; color: #484f58; }
+        """)
         self.btn_stop_30s.setEnabled(False)
         self.btn_stop_30s.clicked.connect(self._on_stop_30s_emergency)
 
-        self.btn_toggle_final_answer = QPushButton("👁 [Hiện Đáp Án Final trên TV]")
+        self.btn_toggle_final_answer = QPushButton("TOGGLE TV ANSWER")
         self.btn_toggle_final_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; padding: 8px 16px; border: 1px solid #30363d;")
         self.btn_toggle_final_answer.clicked.connect(self._on_toggle_final_answer_clicked)
 
         self.timer_bar = QProgressBar()
         self.timer_bar.setRange(0, 30)
         self.timer_bar.setValue(30)
-        self.timer_bar.setFormat("30 giây")
+        self.timer_bar.setFormat("30 seconds")
 
         t_layout.addWidget(self.btn_start_30s)
+        t_layout.addWidget(self.btn_restart_final)
         t_layout.addWidget(self.btn_stop_30s)
         t_layout.addWidget(self.btn_toggle_final_answer)
         t_layout.addWidget(self.timer_bar, 1)
         s3_layout.addLayout(t_layout)
         layout.addWidget(self.step3_box)
 
-        # Step 4: Grading & Champion (Host Only)
-        self.step4_box = QGroupBox("BƯỚC 4: CHẤM ĐIỂM & TỔNG KẾT (CHỈ HIỂN THỊ TRÊN HOST)")
+        # STEP 4: Podium Reveal Sequence (Host Controller Only - Never Mirrored to TV)
+        self.step4_box = QGroupBox("STEP 4: SONY PODIUM REVEAL SEQUENCE (3RD -> 2ND -> 1ST)")
+        self.step4_box.setMinimumHeight(310)
         self.step4_box.setEnabled(False)
         s4_layout = QVBoxLayout(self.step4_box)
 
-        g_layout = QHBoxLayout()
-        self.grade_checks = {}
-        for p_id in ("p1", "p2", "p3"):
-            box = QFrame()
-            box.setStyleSheet("background-color: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 6px;")
-            b_lay = QVBoxLayout(box)
-            p_lbl = QLabel(self.contestants[p_id]["name"])
-            p_lbl.setStyleSheet("font-weight: bold; color: #58a6ff;")
-            chk = QCheckBox(" Trả lời ĐÚNG")
-            chk.setChecked(True)
-            chk.setStyleSheet("color: #3fb950; font-weight: bold;")
-            b_lay.addWidget(p_lbl)
-            b_lay.addWidget(chk)
-            g_layout.addWidget(box)
-            self.grade_checks[p_id] = chk
-        s4_layout.addLayout(g_layout)
+        self.reveal_cards_layout = QHBoxLayout()
+        s4_layout.addLayout(self.reveal_cards_layout)
 
-        self.btn_calc_final = QPushButton(" [Tổng kết & Chấm Điểm]")
-        self.btn_calc_final.setStyleSheet("background-color: #a371f7; color: white; font-weight: bold; padding: 9px;")
+        self.btn_calc_final = QPushButton("DETERMINE CHAMPION")
+        self.btn_calc_final.setStyleSheet("""
+            QPushButton {
+                background-color: #21262d; color: #8b949e; font-weight: bold; font-size: 14px;
+                padding: 10px; border-radius: 6px; border: 1px solid #30363d;
+            }
+        """)
+        self.btn_calc_final.setEnabled(False)
         self.btn_calc_final.clicked.connect(self._on_calc_final)
         s4_layout.addWidget(self.btn_calc_final)
 
         layout.addWidget(self.step4_box)
         layout.addStretch()
-        return widget
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setWidget(widget)
+        return scroll
+
+    def _refresh_final_wagers_ui(self):
+        """Update Final Jeopardy wagering UI according to official rules:
+        - Only contestants with positive scores (> $0) can wager and participate.
+        - Wager range: $0 up to full cumulative score.
+        - Disqualified contestants (score <= 0) -> disabled spinbox + disqualified status.
+        """
+        eligible = self.s_engine.get_final_eligible_players() if hasattr(self, 's_engine') else ["p1", "p2", "p3"]
+        for p_id in ("p1", "p2", "p3"):
+            c_name = self.contestants[p_id]["name"]
+            score = self.contestants[p_id]["score"]
+            is_eligible = p_id in eligible
+
+            if p_id in self.wager_name_labels:
+                self.wager_name_labels[p_id].setText(c_name)
+            if p_id in self.wager_notes:
+                if is_eligible:
+                    self.wager_notes[p_id].setText(f"Score: ${score} | Wager: $0 - ${score}")
+                    self.wager_notes[p_id].setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: bold;")
+                else:
+                    self.wager_notes[p_id].setText(f"Score: ${score} — ELIMINATED FROM ROUND 3")
+                    self.wager_notes[p_id].setStyleSheet("color: #da3633; font-size: 12px; font-weight: bold;")
+            if p_id in self.wager_spins:
+                max_w = max(score, 0)
+                self.wager_spins[p_id].setRange(0, max_w)
+                self.wager_spins[p_id].setValue(0)
+                self.wager_spins[p_id].setEnabled(is_eligible)
 
     def _on_manual_override_toggled(self, checked):
         self.manual_frame.setVisible(checked)
         if checked:
-            cat = self.edit_cat.text().strip() or "CHỦ ĐỀ THỦ CÔNG"
-            self.final_cat_lbl.setText(f"Chủ đề Final (Manual): {cat.upper()}")
+            cat = self.edit_cat.text().strip() or "MANUAL FINAL CATEGORY"
+            self.final_cat_lbl.setText(f"Final Category (Manual): {cat.upper()}")
             for spin in self.wager_spins.values():
                 spin.setEnabled(True)
         else:
@@ -1717,18 +1657,24 @@ class HostControllerWindow(QMainWindow):
 
         if row:
             self.final_clue_data = dict(row)
-            self.final_cat_lbl.setText(f"Chủ đề Final Jeopardy: {self.final_clue_data['category_name'].upper()}")
-            html = f"<b>Manh mối:</b> <span style='color:#58a6ff;'>{self.final_clue_data['question_text']}</span><br/><b>Đáp án Host:</b> <span style='color:#3fb950;'>{self.final_clue_data['answer_text']}</span>"
+            self.final_cat_lbl.setText(f"Final Category: {self.final_clue_data['category_name'].upper()}")
+            html = f"<b>Clue:</b> <span style='color:#58a6ff;'>{self.final_clue_data['question_text']}</span><br/><b>Host Answer:</b> <span style='color:#3fb950;'>{self.final_clue_data['answer_text']}</span>"
             self.final_clue_preview.setHtml(html)
         else:
             self.final_clue_data = None
-            self.final_cat_lbl.setText("Chủ đề Final: (Chưa cấu hình câu hỏi Round 3)")
-            self.final_clue_preview.setText("Vui lòng nạp dữ liệu ở Tab 4 hoặc tích chọn Manual Override.")
+            self.final_cat_lbl.setText("Final Category: (No Round 3 Clue Configured)")
+            self.final_clue_preview.setText("Please add Round 3 clue in Tab 4 or check Manual Override.")
 
     def _on_show_splash(self):
         cat_name = self.edit_cat.text().strip() if self.chk_manual_override.isChecked() else (self.final_clue_data['category_name'] if self.final_clue_data else "FINAL JEOPARDY")
         event_bus.trigger_final_step.emit(1, {"category": cat_name})
         self.step2_box.setEnabled(True)
+        self._refresh_final_wagers_ui()
+
+    def _on_show_category_tv(self):
+        cat_name = self.edit_cat.text().strip() if self.chk_manual_override.isChecked() else (self.final_clue_data['category_name'] if self.final_clue_data else "FINAL JEOPARDY")
+        event_bus.trigger_final_step.emit(2, {"category": cat_name})
+        event_bus.play_sound_event.emit("wager_music")
 
     def _on_lock_wagers(self):
         for p_id in ("p1", "p2", "p3"):
@@ -1736,6 +1682,7 @@ class HostControllerWindow(QMainWindow):
             self.wager_spins[p_id].setEnabled(False)
 
         cat_name = self.edit_cat.text().strip() if self.chk_manual_override.isChecked() else (self.final_clue_data['category_name'] if self.final_clue_data else "FINAL JEOPARDY")
+        event_bus.submit_final_wagers.emit(self.final_wagers)
         event_bus.trigger_final_step.emit(2, {"category": cat_name, "wagers": self.final_wagers})
 
         self.btn_lock_wagers.setEnabled(False)
@@ -1743,14 +1690,15 @@ class HostControllerWindow(QMainWindow):
 
     def _on_start_30s(self):
         self.btn_start_30s.setEnabled(False)
+        self.btn_restart_final.setEnabled(True)
         self.btn_stop_30s.setEnabled(True)
         self.final_timer_seconds = 30
         self.timer_bar.setValue(30)
-        self.timer_bar.setFormat("30 giây")
+        self.timer_bar.setFormat("30 seconds")
 
         if self.chk_manual_override.isChecked():
-            clue_text = self.edit_clue.text().strip() or "Manh mối Final thủ công"
-            ans_text = self.edit_ans.text().strip() or "Đáp án thủ công"
+            clue_text = self.edit_clue.text().strip() or "Manual Final Jeopardy Clue"
+            ans_text = self.edit_ans.text().strip() or "Manual Answer"
             clue_data = {
                 "round_id": 3,
                 "category_name": self.edit_cat.text().strip() or "FINAL JEOPARDY",
@@ -1766,12 +1714,25 @@ class HostControllerWindow(QMainWindow):
         event_bus.play_sound_event.emit("think_music")
         self.final_timer.start(1000)
 
+    def _on_restart_30s(self):
+        """Rewind Think Music to 0:00, reset timer to 30s, and re-arm 15s red cross-fade."""
+        self.final_timer_seconds = 30
+        self.timer_bar.setValue(30)
+        self.timer_bar.setFormat("30 seconds")
+        self.btn_stop_30s.setEnabled(True)
+        self.btn_restart_final.setEnabled(True)
+        self.final_timer.stop()
+        self.final_timer.start(1000)
+        event_bus.restart_final_timer.emit()
+
     def _on_stop_30s_emergency(self):
         self.final_timer.stop()
         self.audio_manager.stop_music()
-        self.timer_bar.setFormat("ĐÃ DỪNG KHẨN CẤP")
+        self.timer_bar.setFormat("EMERGENCY STOPPED")
         self.btn_stop_30s.setEnabled(False)
+        self.btn_restart_final.setEnabled(True)
         self.step4_box.setEnabled(True)
+        self._setup_final_reveal_order()
 
     def _on_toggle_final_answer_clicked(self):
         self.is_final_answer_visible = not self.is_final_answer_visible
@@ -1782,42 +1743,164 @@ class HostControllerWindow(QMainWindow):
 
         event_bus.toggle_tv_answer.emit(self.is_final_answer_visible, ans)
         if self.is_final_answer_visible:
-            self.btn_toggle_final_answer.setText("👁 [Ẩn Đáp Án Final trên TV]")
+            self.btn_toggle_final_answer.setText("HIDE TV ANSWER")
             self.btn_toggle_final_answer.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 8px 16px; border: 1px solid #3fb950;")
         else:
-            self.btn_toggle_final_answer.setText("👁 [Hiện Đáp Án Final trên TV]")
+            self.btn_toggle_final_answer.setText("TOGGLE TV ANSWER")
             self.btn_toggle_final_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; padding: 8px 16px; border: 1px solid #30363d;")
 
     def _on_final_timer_tick(self):
         self.final_timer_seconds -= 1
         self.timer_bar.setValue(self.final_timer_seconds)
-        self.timer_bar.setFormat(f"{self.final_timer_seconds} giây")
+        self.timer_bar.setFormat(f"{self.final_timer_seconds} seconds")
 
-        # Đúng sau 15 giây đếm ngược: kích hoạt cross-fade Xanh -> Đỏ
+        # Exactly at 15 seconds remaining: trigger cross-fade from Blue to Red
         if self.final_timer_seconds == 15:
             event_bus.start_final_crossfade.emit()
 
         if self.final_timer_seconds <= 0:
             self.final_timer.stop()
-            self.timer_bar.setFormat("HẾT GIỜ! ĐẶT BÚT!")
+            self.timer_bar.setFormat("TIME OUT! PENS DOWN!")
             self.btn_stop_30s.setEnabled(False)
-            event_bus.play_sound_event.emit("timeout")
+            # Master Spec §6.1 & Part 1 §5: Round 3 ends in complete silence (NO buzzers or timeout sound)
             self.step4_box.setEnabled(True)
+            self._setup_final_reveal_order()
+
+    def _setup_final_reveal_order(self):
+        """Initialize contestant podium reveal in authentic Sony show order: Rank 3 -> Rank 2 -> Rank 1."""
+        while self.reveal_cards_layout.count():
+            child = self.reveal_cards_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        ranked = sorted(
+            [("p1", self.contestants["p1"]["score"]),
+             ("p2", self.contestants["p2"]["score"]),
+             ("p3", self.contestants["p3"]["score"])],
+            key=lambda x: x[1]
+        )
+        self.final_reveal_order = [p[0] for p in ranked]
+        self.final_reveal_state = {}
+        self.reveal_widgets = {}
+
+        rank_labels = ["3RD PLACE (STEP 1)", "2ND PLACE (STEP 2)", "1ST PLACE (STEP 3 - LEADER)"]
+
+        for idx, p_id in enumerate(self.final_reveal_order):
+            self.final_reveal_state[p_id] = 0
+            box = QFrame()
+            box.setMinimumHeight(210)
+            box.setObjectName(f"reveal_card_{p_id}")
+            box.setStyleSheet(f"""
+                QFrame#reveal_card_{p_id} {{
+                    background-color: #161b22;
+                    border: 2px solid {'#388bfd' if idx == 0 else '#30363d'};
+                    border-radius: 8px;
+                    padding: 10px;
+                }}
+            """)
+            b_lay = QVBoxLayout(box)
+            b_lay.setSpacing(6)
+
+            tag_lbl = QLabel(rank_labels[idx])
+            tag_lbl.setStyleSheet("font-size: 11px; font-weight: 900; color: #f59e0b;")
+            p_name = self.contestants[p_id]["name"]
+            p_score = self.contestants[p_id]["score"]
+            p_wager = self.final_wagers.get(p_id, 0)
+
+            name_lbl = QLabel(f"{p_name} (${p_score})")
+            name_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #58a6ff;")
+
+            wager_lbl = QLabel(f"Wager: ${p_wager}")
+            wager_lbl.setStyleSheet("font-size: 12px; color: #c9d1d9;")
+
+            resp_edit = QLineEdit()
+            resp_edit.setPlaceholderText("Contestant written response...")
+            resp_edit.setStyleSheet("background-color: #0d1117; color: white; border: 1px solid #30363d; padding: 6px; border-radius: 4px;")
+
+            chk = QCheckBox(" Response CORRECT")
+            chk.setChecked(True)
+            chk.setStyleSheet("color: #3fb950; font-weight: bold;")
+
+            btn_step = QPushButton("1. Reveal Response" if idx == 0 else "Waiting...")
+            btn_step.setEnabled(idx == 0)
+            btn_step.setStyleSheet("""
+                QPushButton { background-color: #1f6feb; color: white; font-weight: bold; padding: 6px; border-radius: 4px; }
+                QPushButton:disabled { background-color: #21262d; color: #484f58; }
+            """)
+            btn_step.clicked.connect(lambda chk=False, pid=p_id: self._on_reveal_contestant_step(pid))
+
+            b_lay.addWidget(tag_lbl)
+            b_lay.addWidget(name_lbl)
+            b_lay.addWidget(wager_lbl)
+            b_lay.addWidget(resp_edit)
+            b_lay.addWidget(chk)
+            b_lay.addWidget(btn_step)
+
+            self.reveal_cards_layout.addWidget(box)
+            self.reveal_widgets[p_id] = {
+                "frame": box,
+                "resp_edit": resp_edit,
+                "chk": chk,
+                "btn_step": btn_step,
+                "wager_lbl": wager_lbl,
+                "name_lbl": name_lbl,
+                "wager": p_wager,
+            }
+
+    def _on_reveal_contestant_step(self, pid):
+        st = self.final_reveal_state.get(pid, 0)
+        w = self.reveal_widgets[pid]
+        resp_text = w["resp_edit"].text().strip() or "(No response)"
+        wager = w["wager"]
+        is_correct = w["chk"].isChecked()
+
+        if st == 0:
+            # Click 1: Reveal written response
+            self.final_reveal_state[pid] = 1
+            event_bus.trigger_final_contestant_reveal.emit(pid, resp_text, 0)
+            w["btn_step"].setText(f"2. Reveal Wager (${wager}) & Resolve")
+            w["btn_step"].setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px; border-radius: 4px;")
+        elif st == 1:
+            # Click 2: Reveal wager and adjust score
+            self.final_reveal_state[pid] = 2
+            if is_correct:
+                self.s_engine.add_correct(pid, wager)
+                
+            else:
+                self.s_engine.add_incorrect(pid, wager)
+                event_bus.play_sound_event.emit("timeout")
+
+            new_score = self.s_engine.get_score(pid)
+            self.contestants[pid]["score"] = new_score
+            scores = self.s_engine.get_all_scores()
+            event_bus.score_updated.emit(scores)
+            self._update_live_score_display()
+
+            event_bus.trigger_final_contestant_reveal.emit(pid, resp_text, wager)
+            w["name_lbl"].setText(f"{self.contestants[pid]['name']} (${new_score})")
+            w["btn_step"].setText("Resolved")
+            w["btn_step"].setEnabled(False)
+            w["btn_step"].setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; padding: 6px; border-radius: 4px;")
+
+            curr_idx = self.final_reveal_order.index(pid)
+            if curr_idx + 1 < len(self.final_reveal_order):
+                next_pid = self.final_reveal_order[curr_idx + 1]
+                next_w = self.reveal_widgets[next_pid]
+                next_w["btn_step"].setText("1. Reveal Response")
+                next_w["btn_step"].setEnabled(True)
+                next_w["frame"].setStyleSheet(f"QFrame#reveal_card_{next_pid} {{ background-color: #161b22; border: 2px solid #388bfd; border-radius: 8px; padding: 10px; }}")
+            else:
+                self.btn_calc_final.setEnabled(True)
+                self.btn_calc_final.setStyleSheet("""
+                    QPushButton {
+                        background-color: #8957e5; color: white; font-weight: bold; font-size: 14px;
+                        padding: 10px; border-radius: 6px; border: 1px solid #a371f7;
+                    }
+                    QPushButton:hover { background-color: #a371f7; }
+                """)
 
     def _on_calc_final(self):
-        final_totals = {}
-        for p_id in ("p1", "p2", "p3"):
-            wager = self.final_wagers[p_id]
-            is_correct = self.grade_checks[p_id].isChecked()
-            cur = self.contestants[p_id]["score"]
-            new_score = cur + wager if is_correct else cur - wager
-            if is_correct:
-                self.s_engine.add_correct(p_id, wager)
-            else:
-                self.s_engine.add_incorrect(p_id, wager)
-            self.contestants[p_id]["score"] = new_score
-            final_totals[p_id] = new_score
-
+        final_totals = {pid: self.contestants[pid]["score"] for pid in ("p1", "p2", "p3")}
         event_bus.score_updated.emit(final_totals)
         self._update_live_score_display()
 
@@ -1831,19 +1914,17 @@ class HostControllerWindow(QMainWindow):
             "second": {"id": s_id, "name": self.contestants[s_id]["name"], "score": s_score, "prize": "$3,000"},
             "third": {"id": t_id, "name": self.contestants[t_id]["name"], "score": t_score, "prize": "$2,000"},
         }
-        # Lưu ý: TV Display ẨN HOÀN TOÀN màn hình quán quân
         event_bus.winner_announced.emit(results)
-        event_bus.play_sound_event.emit("correct")
+        
 
         QMessageBox.information(
             self,
-            "Quán quân Chung cuộc! (Bảng điều khiển Host)",
-            f"🏆 Quán quân: {self.contestants[w_id]['name']} (${w_score})\n"
-            f"🥈 Á quân: {self.contestants[s_id]['name']} (${s_score}) - $3,000\n"
-            f"🥉 Hạng ba: {self.contestants[t_id]['name']} (${t_score}) - $2,000\n\n"
-            "(Lưu ý: Màn hình TV không hiển thị bảng điểm vinh danh để đảm bảo tính thẩm mỹ phát sóng)"
+            "Tournament Champion! (Host Controller Only)",
+            f"Champion: {self.contestants[w_id]['name']} (${w_score})\n"
+            f"1st Runner-up: {self.contestants[s_id]['name']} (${s_score}) - $3,000\n"
+            f"2nd Runner-up: {self.contestants[t_id]['name']} (${t_score}) - $2,000\n\n"
+            "(Note: Champion results are strictly displayed on Host Console to preserve authentic Jeopardy! TV presentation.)"
         )
-
 
     # =========================================================================
     # TAB 4: DATABASE MANAGER
@@ -1856,18 +1937,18 @@ class HostControllerWindow(QMainWindow):
         layout.setSpacing(12)
 
         top = QHBoxLayout()
-        lbl = QLabel("Lọc theo Vòng:")
+        lbl = QLabel("Filter by Round:")
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["Tất cả các vòng", "Round 1 (Jeopardy)", "Round 2 (Double Jeopardy)", "Round 3 (Final Jeopardy)"])
+        self.filter_combo.addItems(["All Rounds", "Round 1 (Jeopardy)", "Round 2 (Double Jeopardy)", "Round 3 (Final Jeopardy)"])
         self.filter_combo.currentIndexChanged.connect(self._refresh_database_table)
 
-        btn_add = QPushButton("+ Thêm dòng mới")
+        btn_add = QPushButton("+ Add Clue Row")
         btn_add.clicked.connect(self._on_add_db_row)
 
-        btn_del = QPushButton("- Xóa dòng đã chọn")
+        btn_del = QPushButton("- Delete Selected Row")
         btn_del.clicked.connect(self._on_delete_db_row)
 
-        btn_reset = QPushButton(" Đặt lại chưa mở (Reset is_used)")
+        btn_reset = QPushButton("Reset Used Flags (is_used=0)")
         btn_reset.clicked.connect(self._on_reset_used_flags)
 
         top.addWidget(lbl)
@@ -1889,11 +1970,11 @@ class HostControllerWindow(QMainWindow):
         layout.addWidget(self.db_table)
 
         bot = QHBoxLayout()
-        self.btn_save_db = QPushButton(" [Lưu toàn bộ thay đổi vào Database]")
+        self.btn_save_db = QPushButton("[Save All Changes to Database]")
         self.btn_save_db.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 9px 20px;")
         self.btn_save_db.clicked.connect(self._on_save_db)
 
-        self.db_status = QLabel("Sẵn sàng.")
+        self.db_status = QLabel("Ready.")
         self.db_status.setStyleSheet("color: #8b949e;")
 
         bot.addWidget(self.btn_save_db)
@@ -1948,7 +2029,7 @@ class HostControllerWindow(QMainWindow):
             self.db_table.setItem(r_idx, 10, used_item)
 
         self.db_table.resizeColumnsToContents()
-        self.db_status.setText(f"Đã tải {len(rows)} câu hỏi.")
+        self.db_status.setText(f"Loaded {len(rows)} questions.")
 
     def _on_add_db_row(self):
         r = self.db_table.rowCount()
@@ -1959,10 +2040,10 @@ class HostControllerWindow(QMainWindow):
         self.db_table.setItem(r, 1, QTableWidgetItem("1"))
         self.db_table.setItem(r, 2, QTableWidgetItem("0"))
         self.db_table.setItem(r, 3, QTableWidgetItem("0"))
-        self.db_table.setItem(r, 4, QTableWidgetItem("Chủ đề mới"))
+        self.db_table.setItem(r, 4, QTableWidgetItem("New Category"))
         self.db_table.setItem(r, 5, QTableWidgetItem("200"))
-        self.db_table.setItem(r, 6, QTableWidgetItem("Nội dung câu hỏi?"))
-        self.db_table.setItem(r, 7, QTableWidgetItem("Đáp án chuẩn"))
+        self.db_table.setItem(r, 6, QTableWidgetItem("Clue text?"))
+        self.db_table.setItem(r, 7, QTableWidgetItem("Correct answer"))
         self.db_table.setItem(r, 8, QTableWidgetItem(""))
 
         dd = QTableWidgetItem()
@@ -1985,7 +2066,7 @@ class HostControllerWindow(QMainWindow):
                 conn.cursor().execute("DELETE FROM questions WHERE id = ?", (int(id_text),))
                 conn.commit()
         self.db_table.removeRow(cur)
-        self.db_status.setText("Đã xóa dòng.")
+        self.db_status.setText("Row deleted.")
 
     def _on_reset_used_flags(self):
         with self._get_db_conn() as conn:
@@ -1993,7 +2074,7 @@ class HostControllerWindow(QMainWindow):
             conn.commit()
         self._refresh_database_table()
         self._load_board_for_round(self.current_round)
-        QMessageBox.information(self, "Đã đặt lại", "Tất cả câu hỏi đã được đặt về CHƯA MỞ (is_used = 0).")
+        QMessageBox.information(self, "Reset Complete", "All questions reset to UNUSED (is_used = 0).")
 
     def _on_save_db(self):
         try:
@@ -2027,22 +2108,64 @@ class HostControllerWindow(QMainWindow):
             self._refresh_database_table()
             self._load_board_for_round(self.current_round)
             self._load_final_jeopardy_data()
-            QMessageBox.information(self, "Lưu thành công", "Đã đồng bộ CSDL SQLite thành công!")
+            QMessageBox.information(self, "Success", "SQLite database synchronized successfully!")
         except Exception as ex:
-            QMessageBox.critical(self, "Lỗi lưu CSDL", str(ex))
+            QMessageBox.critical(self, "Database Error", str(ex))
 
     # =========================================================================
-    # BOTTOM DOCK: LIVE SCORING CONSOLE
+    # BOTTOM DOCK: LIVE SCORING & BUZZER CONTROLS
     # =========================================================================
 
     def _build_bottom_dock(self):
-        self.score_dock = QDockWidget("BẢNG TÍNH ĐIỂM TRỰC TIẾP & CHUÔNG 3 NGƯỜI CHƠI (LIVE SCORING & BUZZER)", self)
+        self.score_dock = QDockWidget("LIVE SCORING CONSOLE", self)
         self.score_dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
 
         dock_widget = QWidget()
-        layout = QVBoxLayout(dock_widget)
-        layout.setContentsMargins(14, 8, 14, 10)
-        layout.setSpacing(8)
+        dock_layout = QVBoxLayout(dock_widget)
+        dock_layout.setContentsMargins(12, 6, 12, 8)
+        dock_layout.setSpacing(6)
+
+        dock_header = QHBoxLayout()
+        dock_title_lbl = QLabel("LIVE SCORING CONTROLS")
+        dock_title_lbl.setStyleSheet("font-size: 12px; font-weight: bold; color: #8b949e;")
+
+        self.btn_dock_toggle = QPushButton("[-] Collapse")
+        self.btn_dock_toggle.setStyleSheet("""
+            QPushButton {
+                background-color: #21262d; color: #c9d1d9; font-weight: bold;
+                font-size: 11px; padding: 4px 12px; border: 1px solid #30363d; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #30363d; color: #ffffff; }
+        """)
+        self.btn_dock_toggle.clicked.connect(self._toggle_dock_collapse)
+
+        dock_header.addWidget(dock_title_lbl)
+        dock_header.addStretch()
+        dock_header.addWidget(self.btn_dock_toggle)
+        dock_layout.addLayout(dock_header)
+
+        # 1. COMPACT BAR WIDGET (Collapsed state: slim row of 3 player scores)
+        self.dock_compact_widget = QWidget()
+        compact_layout = QHBoxLayout(self.dock_compact_widget)
+        compact_layout.setContentsMargins(4, 2, 4, 2)
+        compact_layout.setSpacing(16)
+
+        self.compact_score_labels = {}
+        for pid in ("p1", "p2", "p3"):
+            lbl = QLabel(f"{self.contestants[pid]['name']}: $0")
+            lbl.setStyleSheet("font-size: 13px; font-weight: 800; color: #3fb950; background: #0d1117; padding: 4px 12px; border-radius: 4px; border: 1px solid #21262d;")
+            self.compact_score_labels[pid] = lbl
+            compact_layout.addWidget(lbl)
+
+        compact_layout.addStretch()
+        self.dock_compact_widget.setVisible(False)
+        dock_layout.addWidget(self.dock_compact_widget)
+
+        # 2. DETAILED WIDGET (Expanded state)
+        self.dock_detailed_widget = QWidget()
+        detailed_layout = QVBoxLayout(self.dock_detailed_widget)
+        detailed_layout.setContentsMargins(0, 0, 0, 0)
+        detailed_layout.setSpacing(6)
 
         cards = QHBoxLayout()
         cards.setSpacing(14)
@@ -2057,25 +2180,8 @@ class HostControllerWindow(QMainWindow):
             top_p = QHBoxLayout()
             name_lbl = QLabel(self.contestants[p_id]["name"])
             name_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #58a6ff;")
-
-            lamp_lbl = QLabel("CHUÔNG SẴN SÀNG")
-            lamp_lbl.setStyleSheet("background-color: #21262d; color: #3fb950; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px;")
-            lamp_lbl.setAlignment(Qt.AlignCenter)
-
             top_p.addWidget(name_lbl)
             top_p.addStretch()
-            top_p.addWidget(lamp_lbl)
-
-            btn_buzzer = QPushButton("🔔 BẤM CHUÔNG")
-            btn_buzzer.setStyleSheet("""
-                QPushButton {
-                    background-color: #d29922; color: #0d1117; font-weight: 900;
-                    padding: 6px; font-size: 12px; border-radius: 5px;
-                }
-                QPushButton:hover { background-color: #e3b341; }
-                QPushButton:disabled { background-color: #21262d; color: #484f58; }
-            """)
-            btn_buzzer.clicked.connect(lambda chk=False, pid=p_id: self._on_buzzer_pressed(pid))
 
             score_lbl = QLabel("$ 0")
             score_lbl.setStyleSheet("font-size: 26px; font-weight: 900; color: #3fb950; background-color: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 4px;")
@@ -2099,11 +2205,11 @@ class HostControllerWindow(QMainWindow):
             spin.setValue(100)
             spin.setSingleStep(100)
 
-            btn_c_add = QPushButton("+ Đúng")
+            btn_c_add = QPushButton("+ Correct")
             btn_c_add.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 5px;")
             btn_c_add.clicked.connect(lambda chk=False, pid=p_id, s=spin: self._adjust_score(pid, s.value(), True))
 
-            btn_c_sub = QPushButton("- Sai")
+            btn_c_sub = QPushButton("- Wrong")
             btn_c_sub.setStyleSheet("background-color: #da3633; color: white; font-weight: bold; padding: 5px;")
             btn_c_sub.clicked.connect(lambda chk=False, pid=p_id, s=spin: self._adjust_score(pid, s.value(), False))
 
@@ -2112,7 +2218,6 @@ class HostControllerWindow(QMainWindow):
             r2.addWidget(btn_c_sub)
 
             c_lay.addLayout(top_p)
-            c_lay.addWidget(btn_buzzer)
             c_lay.addWidget(score_lbl)
             c_lay.addLayout(r1)
             c_lay.addLayout(r2)
@@ -2120,8 +2225,6 @@ class HostControllerWindow(QMainWindow):
             self.score_cards[p_id] = {
                 "card_frame": card,
                 "name_lbl": name_lbl,
-                "lamp_lbl": lamp_lbl,
-                "btn_buzzer": btn_buzzer,
                 "score_lbl": score_lbl,
                 "btn_add": btn_add,
                 "btn_sub": btn_sub,
@@ -2129,92 +2232,87 @@ class HostControllerWindow(QMainWindow):
             }
             cards.addWidget(card)
 
-        layout.addLayout(cards)
+        detailed_layout.addLayout(cards)
 
         bot = QHBoxLayout()
-        btn_undo = QPushButton("↩ [Hoàn tác điểm số (Undo)]")
+        btn_undo = QPushButton("[Undo Last Score Action]")
         btn_undo.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 6px 16px;")
         btn_undo.clicked.connect(self._on_undo_score)
 
-        btn_reset_buzzers = QPushButton("🔔 [Mở Khóa Chuông (Reset Buzzers)]")
-        btn_reset_buzzers.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 16px;")
-        btn_reset_buzzers.clicked.connect(self._reset_buzzers)
-
         bot.addWidget(btn_undo)
-        bot.addWidget(btn_reset_buzzers)
         bot.addStretch()
-        layout.addLayout(bot)
+        detailed_layout.addLayout(bot)
+
+        dock_layout.addWidget(self.dock_detailed_widget)
 
         self.score_dock.setWidget(dock_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.score_dock)
+        self.resizeDocks([self.score_dock], [260], Qt.Vertical)
+
+    def _toggle_dock_collapse(self):
+        """Toggle collapsed / expanded live scoring console."""
+        self.is_dock_collapsed = not getattr(self, "is_dock_collapsed", False)
+        if self.is_dock_collapsed:
+            self.dock_detailed_widget.setVisible(False)
+            self.dock_compact_widget.setVisible(True)
+            self.btn_dock_toggle.setText("[+] Expand")
+        else:
+            self.dock_compact_widget.setVisible(False)
+            self.dock_detailed_widget.setVisible(True)
+            self.btn_dock_toggle.setText("[-] Collapse")
+
+    def _update_buzzer_lockout_ui(self):
+        """Placeholder for future contestant buzzer lockout UI."""
+        pass
+
+    def _enable_buzzers_manual(self):
+        """Placeholder for arming buzzers."""
+        pass
+
+    def _lock_buzzers_manual(self):
+        """Placeholder for locking buzzers."""
+        pass
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)
 
     def _adjust_score(self, player_id, points, is_correct):
+        """Award/deduct score and broadcast updates."""
         if points <= 0:
             return
         if is_correct:
             self.s_engine.add_correct(player_id, points)
-            event_bus.play_sound_event.emit("correct")
         else:
             self.s_engine.add_incorrect(player_id, points)
-            event_bus.play_sound_event.emit("wrong")
+            event_bus.play_sound_event.emit("timeout")
 
         scores = self.s_engine.get_all_scores()
+        for pid in ("p1", "p2", "p3"):
+            self.contestants[pid]["score"] = scores.get(pid, 0)
         event_bus.modify_score.emit(player_id, points, is_correct)
         event_bus.score_updated.emit(scores)
-
-        # Tự động mở khóa chuông và dừng timer 5s khi cho điểm
-        self._reset_buzzers()
+        self._update_live_score_display()
 
     def _on_buzzer_pressed(self, player_id):
-        if self.buzzer_locked:
+        if self.buzzer_locked or player_id in self.excluded_buzzers:
             return
         self.buzzer_locked = True
         self.buzzer_active_player = player_id
 
-        # Khóa 2 người còn lại, highlight người bấm
-        for pid in ("p1", "p2", "p3"):
-            card_data = self.score_cards[pid]
-            if pid == player_id:
-                card_data["card_frame"].setStyleSheet(
-                    "background-color: #1a2234; border: 2px solid #FFD700; border-radius: 8px; padding: 8px;"
-                )
-                card_data["lamp_lbl"].setText("🔔 ĐÃ BẤM CHUÔNG!")
-                card_data["lamp_lbl"].setStyleSheet(
-                    "background-color: #FFD700; color: #000000; font-size: 10px; font-weight: 900; padding: 2px 6px; border-radius: 4px;"
-                )
-            else:
-                card_data["card_frame"].setStyleSheet(
-                    "background-color: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 8px;"
-                )
-                card_data["lamp_lbl"].setText("ĐÃ KHÓA")
-                card_data["lamp_lbl"].setStyleSheet(
-                    "background-color: #21262d; color: #484f58; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px;"
-                )
-                card_data["btn_buzzer"].setEnabled(False)
-
-        # Bắn tín hiệu và phát âm thanh chuông
+        self._update_buzzer_lockout_ui()
+        event_bus.set_buzzer_lockout.emit(True)
         event_bus.trigger_buzzer_press.emit(player_id)
         event_bus.play_sound_event.emit("time_out")
 
-        # Tự động kích hoạt đồng hồ Host 5 giây
         self._start_host_timer_5s()
 
     def _reset_buzzers(self):
-        self.buzzer_locked = False
+        self.buzzer_locked = True
         self.buzzer_active_player = None
-
-        for pid in ("p1", "p2", "p3"):
-            card_data = self.score_cards[pid]
-            card_data["card_frame"].setStyleSheet(
-                "background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 8px;"
-            )
-            card_data["lamp_lbl"].setText("CHUÔNG SẴN SÀNG")
-            card_data["lamp_lbl"].setStyleSheet(
-                "background-color: #21262d; color: #3fb950; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px;"
-            )
-            card_data["btn_buzzer"].setEnabled(True)
-
+        self.excluded_buzzers.clear()
+        self._update_buzzer_lockout_ui()
         self._stop_host_timer_5s()
+        event_bus.set_buzzer_lockout.emit(True)
         event_bus.trigger_buzzer_reset.emit()
 
     def _start_host_timer_5s(self):
@@ -2239,7 +2337,7 @@ class HostControllerWindow(QMainWindow):
         if self.host_timer_remaining_ms <= 0:
             self.host_timer_5s.stop()
             event_bus.play_sound_event.emit("time_out")
-            self.host_timer_lbl.setText("00.0s - HẾT GIỜ!")
+            self.host_timer_lbl.setText("00.0s - TIME OUT!")
             self.host_timer_lbl.setStyleSheet("font-size: 20px; font-weight: 900; color: #f85149; font-family: monospace;")
 
     def _update_host_timer_display(self):
@@ -2262,7 +2360,12 @@ class HostControllerWindow(QMainWindow):
 
     def _update_dock_player_labels(self):
         for p_id in ("p1", "p2", "p3"):
-            self.score_cards[p_id]["name_lbl"].setText(self.contestants[p_id]["name"])
+            name = self.contestants[p_id]["name"]
+            self.score_cards[p_id]["name_lbl"].setText(name)
+            if hasattr(self, "compact_score_labels") and p_id in self.compact_score_labels:
+                sc = self.contestants[p_id]["score"]
+                prefix = f"-${abs(sc)}" if sc < 0 else f"${sc}"
+                self.compact_score_labels[p_id].setText(f"{name}: {prefix}")
 
     def _update_dock_quick_point_buttons(self, points):
         for p_id in ("p1", "p2", "p3"):
@@ -2280,16 +2383,19 @@ class HostControllerWindow(QMainWindow):
                 lbl.setText(f"${sc}")
                 lbl.setStyleSheet("font-size: 26px; font-weight: 900; color: #3fb950; background-color: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 4px;")
 
+            if hasattr(self, "compact_score_labels") and p_id in self.compact_score_labels:
+                name = self.contestants[p_id]["name"]
+                prefix = f"-${abs(sc)}" if sc < 0 else f"${sc}"
+                self.compact_score_labels[p_id].setText(f"{name}: {prefix}")
+                color = "#f85149" if sc < 0 else "#3fb950"
+                self.compact_score_labels[p_id].setStyleSheet(f"font-size: 13px; font-weight: 800; color: {color}; background: #0d1117; padding: 4px 12px; border-radius: 4px; border: 1px solid #21262d;")
+
             if hasattr(self, "wager_notes") and p_id in self.wager_notes:
-                self.wager_notes[p_id].setText(f"Điểm: ${sc}")
-                if not self.chk_manual_override.isChecked():
-                    if sc > 0:
-                        self.wager_spins[p_id].setRange(0, sc)
-                        self.wager_spins[p_id].setValue(min(sc, 1000))
-                        self.wager_spins[p_id].setEnabled(True)
-                    else:
-                        self.wager_spins[p_id].setRange(0, 1000)
-                        self.wager_spins[p_id].setValue(0)
+                max_w = max(sc, 1000)
+                self.wager_notes[p_id].setText(f"Current Score: ${sc} (Max Wager: ${max_w})")
+                if hasattr(self, "wager_spins") and p_id in self.wager_spins:
+                    if not self.chk_manual_override.isChecked():
+                        self.wager_spins[p_id].setRange(0, max_w)
 
     # -------------------------------------------------------------------------
     # EVENT BUS HANDLERS
@@ -2298,6 +2404,12 @@ class HostControllerWindow(QMainWindow):
     def _register_event_bus(self):
         event_bus.score_updated.connect(self._on_score_updated)
         event_bus.change_round.connect(self._on_change_round)
+        event_bus.unlock_round.connect(self._on_unlock_round_signal)
+
+    @Slot(int)
+    def _on_unlock_round_signal(self, round_id):
+        self.unlocked_rounds[round_id] = True
+        self._update_round_button_styles()
 
     @Slot(dict)
     def _on_score_updated(self, scores):
@@ -2313,28 +2425,6 @@ class HostControllerWindow(QMainWindow):
             self._update_round_button_styles()
             if round_id in (1, 2):
                 self._load_board_for_round(round_id)
-
-    def closeEvent(self, event):
-        reply = QMessageBox.question(
-            self,
-            "Xác nhận đóng và Reset",
-            "Bạn có muốn Reset toàn bộ trạng thái ván đấu (Điểm về 0, mở lại tất cả câu hỏi đã dùng) trước khi thoát không?",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            self.s_engine.reset_scores()
-            scores = self.s_engine.get_all_scores()
-            for pid in self.contestants:
-                self.contestants[pid]["score"] = 0
-            event_bus.score_updated.emit(scores)
-            self.q_engine.reset_all_used()
-            event_bus.reset_game_state.emit()
-            event.accept()
-        elif reply == QMessageBox.No:
-            event.accept()
-        else:
-            event.ignore()
 
 
 # Backward compatibility alias

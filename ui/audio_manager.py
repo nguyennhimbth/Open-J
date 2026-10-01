@@ -18,10 +18,10 @@ from core.event_bus import event_bus
 
 
 class AudioManager(QObject):
-    """Quản lý toàn bộ hiệu ứng âm thanh và nhạc nền truyền hình.
-    Tuân thủ nguyên tắc Im Lặng Tuyệt Đối:
-    - Không tự phát còi bíp hệ thống, tone demo hay âm thanh giả lập.
-    - Chỉ phát âm thanh khi người dùng đã gán file cụ thể và file đó tồn tại trên đĩa.
+    """Manages all television broadcast sound effects and background music.
+    Adheres strictly to Absolute Silence Principle:
+    - Never play system beeps, demo tones, or simulated audio.
+    - Only play audio when assigned file exists on disk.
     """
 
     DEFAULT_SOUND_MAP = {}
@@ -242,14 +242,14 @@ class AudioManager(QObject):
             print(f"[AudioManager] Audio playback error: {ex}")
 
     def stop_music(self):
-        """Dừng nhạc nền 30s ngay lập tức."""
+        """Stop 30s background music immediately."""
         try:
             self.player.stop()
         except Exception:
             pass
 
     def stop_all(self):
-        """Dừng ngay lập tức toàn bộ âm thanh (nhạc nền, SFX, fill ticker)."""
+        """Stop all sounds immediately (BGM, SFX, fill tickers)."""
         self.stop_music()
         for effect in self.sfx_effects.values():
             try:

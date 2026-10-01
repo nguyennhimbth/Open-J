@@ -7,6 +7,7 @@ AssetRenderer dual fitting (zoom vs tile), and audio subsystem synchronization v
 
 import os
 import sys
+import math
 import random
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -16,8 +17,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from PySide6.QtCore import Qt, QTimer, Slot, QPropertyAnimation, QEasingCurve, QRect, QParallelAnimationGroup, QPoint
-from PySide6.QtGui import QFont, QColor, QPainter, QBrush, QPen, QPixmap, QKeyEvent
+from PySide6.QtCore import Qt, QTimer, Slot, QPropertyAnimation, QEasingCurve, QRect, QParallelAnimationGroup, QPoint, Property
+from PySide6.QtGui import QFont, QFontMetrics, QColor, QPainter, QBrush, QPen, QPixmap, QKeyEvent, QTransform
+from PySide6.QtCore import Qt, QTimer, Slot, QPropertyAnimation, QEasingCurve, QRect, QParallelAnimationGroup, QPoint, QPointF, Property
+from PySide6.QtGui import QFont, QFontMetrics, QColor, QPainter, QBrush, QPen, QPixmap, QKeyEvent, QTransform, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -50,15 +53,17 @@ FLAT_CARD_STYLE = """
 """
 
 
-def draw_cover_image(painter: QPainter, target_rect: QRect, pixmap: QPixmap):
-    """Phóng to theo cạnh lớn hơn để lấp đầy 100% diện tích (Full-Bleed Cover), căn giữa và crop mép thừa."""
+def draw_cover_image(painter: QPainter, target_rect: QRect, pixmap: QPixmap, smooth: bool = True):
+    """Scale and crop to fill the target rectangle while maintaining original aspect ratio."""
     if not pixmap or pixmap.isNull():
         return
+    transform = Qt.SmoothTransformation if smooth else Qt.FastTransformation
     scaled = pixmap.scaled(
         target_rect.size(),
         Qt.KeepAspectRatioByExpanding,
-        Qt.SmoothTransformation
+        transform
     )
+    # Center and crop overflow
     x = target_rect.x() + (target_rect.width() - scaled.width()) // 2
     y = target_rect.y() + (target_rect.height() - scaled.height()) // 2
     painter.save()
@@ -67,42 +72,114 @@ def draw_cover_image(painter: QPainter, target_rect: QRect, pixmap: QPixmap):
     painter.restore()
 
 
-def draw_mosaic_tile(painter: QPainter, cell_rect: QRect, cell_in_grid: QRect, grid_rect: QRect, full_pixmap: QPixmap):
+def draw_contain_image(painter: QPainter, target_rect: QRect, pixmap: QPixmap, smooth: bool = True):
+    """Preserve original aspect ratio and center logo/icon."""
+    if not pixmap or pixmap.isNull():
+        return
+    transform = Qt.SmoothTransformation if smooth else Qt.FastTransformation
+    scaled = pixmap.scaled(
+        target_rect.size(),
+        Qt.KeepAspectRatio,
+        transform
+    )
+    # Center within bounding box
+    x = target_rect.x() + (target_rect.width() - scaled.width()) // 2
+    y = target_rect.y() + (target_rect.height() - scaled.height()) // 2
+    painter.save()
+    painter.setClipRect(target_rect)
+    painter.drawPixmap(x, y, scaled)
+    painter.restore()
+
+
+def draw_mosaic_tile(painter: QPainter, cell_rect: QRect, cell_in_grid: QRect, grid_rect: QRect, full_pixmap: QPixmap, smooth: bool = True):
     """
     Vẽ từng mảnh của một bức ảnh duy nhất lên từng ô sao cho toàn bộ 36 ô
     tạo thành một bức tranh liền mạch bị chia cắt bởi viền Bezel.
+    Renders contiguous mosaic fragments across video wall cells separated by bezel borders.
     """
     if not full_pixmap or full_pixmap.isNull() or grid_rect.width() <= 0 or grid_rect.height() <= 0:
         return
-    # Scale ảnh gốc phủ kín toàn bộ diện tích khung ma trận 6x6
+    transform = Qt.SmoothTransformation if smooth else Qt.FastTransformation
+    # Scale source image across full 6x6 matrix area
     scaled_full = full_pixmap.scaled(
         grid_rect.size(),
         Qt.KeepAspectRatioByExpanding,
-        Qt.SmoothTransformation
+        transform
     )
-    # Tọa độ offset căn giữa trong grid_rect
+    # Centering offset coordinates in grid_rect
     offset_x = (scaled_full.width() - grid_rect.width()) // 2
     offset_y = (scaled_full.height() - grid_rect.height()) // 2
     
-    # Tính tọa độ vùng cắt tương ứng của cell này trên ảnh lớn
+    # Calculate slice coordinates for this cell
     src_x = (cell_in_grid.x() - grid_rect.x()) + offset_x
     src_y = (cell_in_grid.y() - grid_rect.y()) + offset_y
     src_w = cell_in_grid.width()
     src_h = cell_in_grid.height()
     
-    # Vẽ phần ảnh tương ứng vào cell_rect
+    # Draw slice into cell_rect
     painter.drawPixmap(cell_rect, scaled_full, QRect(src_x, src_y, src_w, src_h))
 
 
+# =============================================================================
+# AUTO-FIT LABEL: DYNAMIC FONT SIZING WIDGET
+# =============================================================================
+
+class AutoFitLabel(QLabel):
+    """Auto-fitting QLabel dynamically calculating optimal point size based on QFontMetrics.
+    Used for: Clue Screen, Final Jeopardy Clue, Bottom Answer Overlay.
+    Replaces fixed font size with dynamic bounds fitting.
+    """
+
+    def __init__(self, max_point_size: int = 54, min_point_size: int = 18, parent=None):
+        super().__init__(parent)
+        self.max_point_size = max_point_size
+        self.min_point_size = min_point_size
+        self.setAlignment(Qt.AlignCenter)
+        self.setWordWrap(True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._adjust_font_size()
+
+    def setText(self, text: str):
+        super().setText(text)
+        self._adjust_font_size()
+
+    def _adjust_font_size(self):
+        text = self.text()
+        if not text:
+            return
+        target_rect = self.contentsRect()
+        if target_rect.width() <= 0 or target_rect.height() <= 0:
+            return
+        current_font = QFont(self.font())
+        best_size = self.min_point_size
+        for size in range(self.max_point_size, self.min_point_size - 1, -2):
+            current_font.setPointSize(size)
+            metrics = QFontMetrics(current_font)
+            bounding = metrics.boundingRect(
+                QRect(0, 0, target_rect.width(), 0),
+                Qt.AlignCenter | Qt.TextWordWrap,
+                text
+            )
+            if bounding.height() <= target_rect.height() and bounding.width() <= target_rect.width():
+                best_size = size
+                break
+        current_font.setPointSize(best_size)
+        self.setFont(current_font)
+
+
 class _CoverImageWidget(QWidget):
-    """Widget chuyên vẽ ảnh phủ kín 100% không để dải màu thừa (Full-Bleed Cover) hoặc màu phẳng."""
-    def __init__(self, parent=None):
+    """Specialized visual container supporting full-bleed cover, centered contain, or solid fills."""
+    def __init__(self, parent=None, mode="cover"):
         super().__init__(parent)
         self.pixmap: Optional[QPixmap] = None
         self.bg_color = QColor("#060CE9")
         self.fallback_text = ""
         self.fallback_font = QFont("Impact", 72, QFont.Bold)
         self.fallback_color = QColor("#FFCC00")
+        self.mode = mode  # "cover" or "contain"
+        self.smooth_transform = True
         self.setStyleSheet(FLAT_CARD_STYLE)
 
     def set_pixmap(self, pixmap: Optional[QPixmap]):
@@ -115,11 +192,15 @@ class _CoverImageWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        if self.smooth_transform:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
         rect = self.rect()
         if self.pixmap and not self.pixmap.isNull():
-            draw_cover_image(painter, rect, self.pixmap)
+            if self.mode == "contain":
+                draw_contain_image(painter, rect, self.pixmap, smooth=self.smooth_transform)
+            else:
+                draw_cover_image(painter, rect, self.pixmap, smooth=self.smooth_transform)
         else:
             painter.fillRect(rect, self.bg_color)
             if self.fallback_text:
@@ -134,14 +215,14 @@ class _CoverImageWidget(QWidget):
 
 class TVCategoryCell(QWidget):
     """
-    Ô tiêu đề Chủ đề ở hàng trên cùng của ma trận 6 cột (Góc vuông 100%).
-    Hỗ trợ 3 trạng thái:
-    - is_mosaic == True: Hiển thị mảnh ghép trong bức tranh màn hình chờ 36 ô.
-    - is_revealed == False: Hiển thị ảnh Unrevealed (Logo địa cầu Jeopardy!)
-    - is_revealed == True: Hiển thị ảnh Revealed (hoặc nền tối) kèm tên chủ đề (font Clue)
+    Top row category header cell in the 6x6 matrix (100% sharp flat borders).
+    Supports 3 visual states:
+    - is_mosaic == True: Sliced tile of the 36-tile standby mosaic video wall.
+    - is_revealed == False: Displays Unrevealed header logo (Globe Jeopardy logo).
+    - is_revealed == True: Displays Revealed background with centered category title.
     """
 
-    def __init__(self, title="CHỦ ĐỀ", parent=None):
+    def __init__(self, title="CATEGORY", parent=None):
         super().__init__(parent)
         self.title = title
         self.is_revealed = False
@@ -200,51 +281,51 @@ class TVCategoryCell(QWidget):
                 top_left = self.mapTo(parent, QPoint(0, 0))
                 cell_in_grid = QRect(top_left.x(), top_left.y(), self.width(), self.height())
                 draw_mosaic_tile(painter, rect, cell_in_grid, parent.rect(), self.mosaic_pixmap)
-                # Viền trong sắc nét
+                # Sharp inner border
                 painter.setPen(QPen(QColor(255, 255, 255, 25), 1))
                 painter.drawRect(rect.adjusted(0, 0, -1, -1))
                 return
 
         if not self.is_revealed:
-            # Trạng thái chưa mở: Ưu tiên ảnh Logo địa cầu
+            # Unrevealed state: display Jeopardy logo
             if self.unrevealed_pixmap and not self.unrevealed_pixmap.isNull():
                 AssetRenderer.render_background(painter, rect, self.unrevealed_pixmap, self.fit_mode)
             else:
                 painter.fillRect(rect, self.bg_color)
         else:
-            # Trạng thái đã mở: Ảnh nền Revealed hoặc nền xanh đậm + Tên chủ đề
+            # Revealed state: display category title on background
             if self.revealed_pixmap and not self.revealed_pixmap.isNull():
                 AssetRenderer.render_background(painter, rect, self.revealed_pixmap, self.fit_mode)
             else:
                 painter.fillRect(rect, self.bg_color)
 
-            # Vẽ tên chủ đề (Font đồng bộ Clue font, in hoa, đổ bóng đen)
+            # Draw category title (All caps, bold, drop shadow)
             font = QFont(self.font_family, self.font_size)
             font.setBold(self.font_bold)
             painter.setFont(font)
 
-            # Drop shadow đen
+            # Black drop shadow
             painter.setPen(QColor(0, 0, 0, 240))
             painter.drawText(rect.adjusted(3, 3, 3, 3), Qt.AlignCenter | Qt.TextWordWrap, str(self.title).upper())
 
-            # Chữ trắng
+            # White text
             painter.setPen(self.text_color)
             painter.drawText(rect, Qt.AlignCenter | Qt.TextWordWrap, str(self.title).upper())
 
-        # Viền trong sắc nét, vuông vức 100%
+        # Sharp inner border
         painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
 
 class TVClueCell(QWidget):
     """
-    Ô điểm số trong ma trận 6x5. Vuông vức 100%, chữ vàng cam có bóng đổ đen.
-    Hỗ trợ tùy chọn: Dùng màu đặc HOẶC ảnh/texture nền via AssetRenderer.
+    Clue point cell in the 6x5 matrix. 100% sharp borders, bold gold typography with black drop shadow.
+    Supports solid color fill or custom texture via AssetRenderer.
     """
 
-    STATE_BLANK = 0   # Nền trơn không có chữ
-    STATE_POINTS = 1  # Bật sáng hiển thị giá trị điểm số
-    STATE_USED = 2    # Đã mở câu hỏi -> Tắt đèn (nền tối đen)
+    STATE_BLANK = 0   # Blank unpopulated background
+    STATE_POINTS = 1  # Active illuminated point value
+    STATE_USED = 2    # Opened / used clue (darkened out)
 
     def __init__(self, points=200, parent=None):
         super().__init__(parent)
@@ -317,13 +398,13 @@ class TVClueCell(QWidget):
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
             return
 
-        # Nền ô (Dùng ảnh hoặc Màu đặc)
+        # Cell background (texture or solid color)
         if self.use_image and self.tile_pixmap and not self.tile_pixmap.isNull():
             AssetRenderer.render_background(painter, rect, self.tile_pixmap, self.fit_mode)
         else:
             painter.fillRect(rect, self.solid_color)
 
-        # Viền trong
+        # Inner border
         painter.setPen(QPen(QColor(255, 255, 255, 40), 1))
         painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
@@ -333,11 +414,11 @@ class TVClueCell(QWidget):
 
             txt = str(self.points)
 
-            # Drop shadow đen đậm
+            # Black drop shadow
             painter.setPen(QColor(0, 0, 0, 245))
             painter.drawText(rect.adjusted(4, 4, 4, 4), Qt.AlignCenter, txt)
 
-            # Chữ vàng cam / vàng chanh
+            # Golden point text
             painter.setPen(self.text_gold)
             painter.drawText(rect, Qt.AlignCenter, txt)
 
@@ -348,8 +429,8 @@ class TVClueCell(QWidget):
 
 class TVPointZoomWidget(QWidget):
     """
-    Widget phóng to toàn màn hình số điểm khổng lồ khi Host bấm mở ô câu hỏi.
-    Hiệu ứng zoom mượt mà từ tọa độ ô điểm ra toàn màn hình (350-450ms OutCubic).
+    Full-window point zoom widget expanding the selected point tile into a centered massive number.
+    Smooth zoom transition from cell coordinates to full display (350-450ms OutCubic).
     """
 
     def __init__(self, parent=None):
@@ -381,43 +462,145 @@ class TVPointZoomWidget(QWidget):
         painter.setRenderHint(QPainter.TextAntialiasing)
 
         rect = self.rect()
+        w, h = rect.width(), rect.height()
+
+        # When expanded to full window, frame with outer black letterbox/pillarbox (Ref. Image 4)
+        if w >= 600 and h >= 400:
+            painter.fillRect(rect, QColor("#000000"))
+            card_w = max(100, int(w * 0.90))
+            card_h = max(100, int(h * 0.90))
+            card_x = (w - card_w) // 2
+            card_y = (h - card_h) // 2
+            card_rect = QRect(card_x, card_y, card_w, card_h)
+        else:
+            card_rect = rect
 
         if self.use_image and self.tile_pixmap and not self.tile_pixmap.isNull():
-            AssetRenderer.render_background(painter, rect, self.tile_pixmap, self.fit_mode)
+            AssetRenderer.render_background(painter, card_rect, self.tile_pixmap, self.fit_mode)
         else:
-            painter.fillRect(rect, self.solid_color)
+            painter.fillRect(card_rect, self.solid_color)
 
-        # Viền đen ngoài cùng
-        painter.setPen(QPen(QColor(0, 0, 0), 4))
-        painter.drawRect(rect.adjusted(0, 0, -1, -1))
-
-        # Điểm số khổng lồ căn giữa (tỉ lệ font tự co dãn theo chiều cao ô)
-        calc_size = max(36, int(rect.height() * 0.46))
+        # Giant centered point value with dynamic scaling
+        calc_size = max(36, int(card_rect.height() * 0.48))
         font = QFont(self.font_family, calc_size, QFont.Bold)
         painter.setFont(font)
 
         txt = str(self.points)
 
-        # Drop shadow đen
+        # Black drop shadow
         offset = max(3, int(calc_size * 0.08))
         painter.setPen(QColor(0, 0, 0, 245))
-        painter.drawText(rect.adjusted(offset, offset, offset, offset), Qt.AlignCenter, txt)
+        painter.drawText(card_rect.adjusted(offset, offset, offset, offset), Qt.AlignCenter, txt)
 
-        # Chữ vàng cam
+        # Gold text
         painter.setPen(self.text_gold)
-        painter.drawText(rect, Qt.AlignCenter, txt)
+        painter.drawText(card_rect, Qt.AlignCenter, txt)
 
 
 # =============================================================================
-# 3. CATEGORY REVEAL 3-LAYER TRANSITION CARD & ENGINE
+# 3. 3D HORIZONTAL CARD FLIP TRANSITION WIDGET (POWERPOINT FLIP EFFECT)
+# =============================================================================
+
+class TVCardFlipTransitionWidget(QWidget):
+    """
+    3D Horizontal Card Flip Transition Widget (PowerPoint Flip Effect).
+    Performs authentic hardware-accelerated 3D card flip around Qt.YAxis:
+      - Phase 1 (0° -> 90°): Rotates front face (Daily Double splash) edge-on.
+      - Phase 2 (90° -> 180°): Rotates back face (Clue Question card) from edge-on to front.
+    Uses QPropertyAnimation with QEasingCurve.InOutCubic.
+    Performs authentic hardware-accelerated 3D card flip matching PowerPoint's <p14:flip dir="r"/>:
+      - Direction: Flips horizontally to the right around the vertical center axis.
+      - Phase 1 (0° -> 90°): Rotates front face (Daily Double splash) with perspective foreshortening.
+      - Phase 2 (90° -> 180°): Rotates back face (Clue Question card) from edge-on to full flat display.
+      - Duration: 1200ms (matching PowerPoint broadcast timing).
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._angle = 0.0
+        self.front_pixmap: Optional[QPixmap] = None
+        self.back_pixmap: Optional[QPixmap] = None
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setStyleSheet("background-color: transparent; border: none;")
+        self.hide()
+
+    def get_angle(self) -> float:
+        return self._angle
+
+    def set_angle(self, angle: float):
+        self._angle = float(angle)
+        self.update()
+
+    angle = Property(float, get_angle, set_angle)
+
+    def start_flip(self, front_pixmap: QPixmap, back_pixmap: QPixmap, duration: int = 1200, finished_callback=None):
+        self.front_pixmap = front_pixmap
+        self.back_pixmap = back_pixmap
+        self._angle = 0.0
+        self.show()
+        self.raise_()
+
+        self.anim = QPropertyAnimation(self, b"angle")
+        self.anim.setDuration(duration)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(180.0)
+        self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+
+        def _on_finished():
+            self.hide()
+            if finished_callback:
+                finished_callback()
+
+        self.anim.finished.connect(_on_finished)
+        self.anim.start()
+
+    def paintEvent(self, event):
+        if not self.front_pixmap or not self.back_pixmap:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        w = self.width()
+        h = self.height()
+        ang = self._angle
+
+        is_front = ang <= 90.0
+        pix = self.front_pixmap if is_front else self.back_pixmap
+        if not pix or pix.isNull():
+            return
+
+        rot_deg = ang if is_front else (ang - 180.0)
+
+        # Basic 3D effect with QTransform projection
+        t = QTransform()
+        t.translate(w / 2.0, h / 2.0)
+        
+        # Add slight perspective projection
+        persp = 0.0015
+        if not is_front:
+            persp = -persp
+        t.m31 = persp * rot_deg
+        
+        t.rotate(rot_deg, Qt.YAxis)
+        t.translate(-w / 2.0, -h / 2.0)
+
+        painter.setTransform(t)
+        scaled_pix = pix.scaled(w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        px = (w - scaled_pix.width()) // 2
+        py = (h - scaled_pix.height()) // 2
+        painter.drawPixmap(px, py, scaled_pix)
+
+# =============================================================================
+# 4. CATEGORY REVEAL 3-LAYER TRANSITION CARD & ENGINE
 # =============================================================================
 
 class TVCategoryCardWidget(QWidget):
     """
-    Khối Card đơn cho Category Reveal gồm 3 lớp phẳng hoàn toàn (Flat 100%):
-    - Layer 1 (Card Background): Khung chữ nhật nền xanh texture/màu, vuông vức 100% (88% khung giữa).
-    - Layer 2 (Category Title Text): Tên chủ đề in hoa, font Georgia đậm, căn giữa, đổ bóng đen (2,2).
-    - Layer 3 (Logo Overlay): Ảnh Logo che phủ với QGraphicsOpacityEffect, phủ kín 100% qua draw_cover_image.
+    Single Card block for Category Reveal consisting of 3 flat layers (Flat 100%):
+    - Layer 1 (Card Background): Deep blue rectangular frame, 100% flat (88% centered box).
+    - Layer 2 (Category Title Text): Uppercase category title, bold typography, centered with shadow.
+    - Layer 3 (Logo Overlay): Logo cover graphic with QGraphicsOpacityEffect, covering 100% of card.
     """
 
     def __init__(self, logo_path=None, parent=None):
@@ -425,7 +608,7 @@ class TVCategoryCardWidget(QWidget):
         self.logo_path = logo_path
         self.setStyleSheet(FLAT_CARD_STYLE)
 
-        self.title = "CHỦ ĐỀ"
+        self.title = "CATEGORY"
         self.bg_color = QColor("#060CE9")
         self.bg_pixmap: Optional[QPixmap] = None
 
@@ -447,8 +630,8 @@ class TVCategoryCardWidget(QWidget):
         title_shadow.setColor(QColor("#000000"))
         self.title_label.setGraphicsEffect(title_shadow)
 
-        # Layer 3: Logo Overlay
-        self.logo_overlay = _CoverImageWidget(self.inner_box)
+        # Layer 3: Logo Overlay (Cover 100% of card face)
+        self.logo_overlay = _CoverImageWidget(self.inner_box, mode="cover")
         self.logo_overlay.fallback_text = "JEOPARDY!"
         self.logo_opacity = QGraphicsOpacityEffect(self.logo_overlay)
         self.logo_opacity.setOpacity(1.0)
@@ -501,25 +684,29 @@ class TVCategoryCardWidget(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         w, h = self.width(), self.height()
-        self.inner_box.setGeometry(0, 0, w, h)
-        self.title_label.setGeometry(40, 40, max(1, w - 80), max(1, h - 80))
-        self.logo_overlay.setGeometry(0, 0, w, h)
+        # Framing: Cụm Logo + Chủ đề được thu nhỏ 10% (đạt kích thước 90%) và căn giữa theo PART1.pdf
+        card_w = max(100, int(w * 0.90))
+        card_h = max(100, int(h * 0.90))
+        card_x = (w - card_w) // 2
+        card_y = (h - card_h) // 2
+        self.inner_box.setGeometry(card_x, card_y, card_w, card_h)
+        self.title_label.setGeometry(30, 30, max(1, card_w - 60), max(1, card_h - 60))
+        self.logo_overlay.setGeometry(0, 0, card_w, card_h)
 
 
 class TVCategoryRevealWidget(QWidget):
     """
-    Transition Engine quản lý chuỗi trượt 6 chủ đề hoàn toàn thủ công theo lệnh Host (Manual Mode):
-    - Không dùng timer tự động.
-    - Hành động 1: Mở cột, Logo che kín 100% (Opacity = 1.0), TV đứng yên chờ lệnh.
-    - Hành động 2: Host bấm -> Fade-out Logo từ 1.0 về 0.0 trong 500ms lộ tên chủ đề.
-    - Hành động 3: Host bấm -> Trượt slide sang trái để nạp cột tiếp theo ở trạng thái Logo che kín.
+    Transition Engine managing manual 6-category intro sequence via Host controls:
+    - Step 1: Open column with Logo covering title at 100% opacity. Holds for Host cue.
+    - Step 2: Host command -> Fade out Logo from 1.0 to 0.0 over 500ms revealing category title.
+    - Step 3: Host command -> Slides left smoothly to load the subsequent category column.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet("background-color: #000000;")
 
-        self.categories = [f"CHỦ ĐỀ {i+1}" for i in range(6)]
+        self.categories = [f"CATEGORY {i+1}" for i in range(6)]
         self.current_index = 0
         self.logo_path = ""
 
@@ -545,7 +732,7 @@ class TVCategoryRevealWidget(QWidget):
         self.card_b.set_bg(bg_image_path, hex_color)
 
     def show_column(self, col_index: int = 0):
-        """Hành động 1: Mở cột tương ứng với Logo che kín 100%, chờ lệnh Host."""
+        """Action 1: Open specified category column covered 100% by logo, awaiting Host command."""
         self.current_index = max(0, min(col_index, len(self.categories) - 1))
         w, h = self.width(), self.height()
         self.active_card = self.card_a
@@ -555,19 +742,20 @@ class TVCategoryRevealWidget(QWidget):
         self.next_card.setGeometry(w, 0, w, h)
 
         cat_title = self.categories[self.current_index] if self.current_index < len(self.categories) else f"CHỦ ĐỀ {self.current_index+1}"
+        cat_title = self.categories[self.current_index] if self.current_index < len(self.categories) else f"CATEGORY {self.current_index+1}"
         self.active_card.set_category_title(cat_title)
         self.active_card.reset_logo_opacity()
         self.active_card.show()
         self.next_card.show()
 
     def fade_logo(self):
-        """Hành động 2: Kích hoạt animation làm mờ Logo từ 1.0 về 0.0 trong 500ms."""
-        event_bus.play_sound_event.emit("category_intro")
+        """Action 2: Trigger fade-out animation to reveal category title over 500ms."""
         self.active_card.fade_out_logo(duration=500)
 
-    @Slot()
-    def slide_next(self):
-        """Hành động 3: Trượt slide sang trái để nạp cột tiếp theo ở trạng thái Logo che kín."""
+    @Slot(bool)
+    def slide_next(self, auto_fade: bool = False):
+        """Action 3: Slide current card left and bring in the next category."""
+        self._pending_auto_fade = auto_fade
         self.current_index += 1
         if self.current_index >= len(self.categories):
             event_bus.close_question.emit()
@@ -602,9 +790,12 @@ class TVCategoryRevealWidget(QWidget):
 
     def _on_slide_finished(self):
         self.active_card, self.next_card = self.next_card, self.active_card
+        if getattr(self, "_pending_auto_fade", False):
+            self._pending_auto_fade = False
+            QTimer.singleShot(150, self.fade_logo)
 
     def handle_manual_step(self, step: int):
-        """Điều khiển từng bước từ Host."""
+        """Handle step control from Host."""
         if step == 0:
             self.show_column(self.current_index)
         elif step == 1:
@@ -630,11 +821,12 @@ class TVCategoryRevealWidget(QWidget):
 
 class TVClueScreenWidget(QWidget):
     """
-    Khung câu hỏi chuẩn truyền hình phẳng 100% (Flat Design):
-    - Phủ trọn vẹn 100% diện tích cửa sổ hiển thị (self.rect()), không viền đen ngoài.
-    - Vẽ bằng QPainter: 0 inner borders, 0 box lines, 0 artifact.
-    - Chữ trắng in hoa, font Georgia đậm, drop shadow đen (2,2).
-    - Lớp hiển thị đáp án tùy chọn (Bottom Answer Overlay) cách mép đáy 50-70px, mặc định ẩn.
+    Standard Sony Pictures Television broadcast clue card:
+    - Deep blue card occupying ~82% width and ~84% height, centered.
+    - Framed by black pillarbox/letterbox (#000000).
+    - Typography: ITC Korinna (fallback Georgia), ALL CAPS, centered.
+    - Crisp black drop shadow (offset: 3px, 3px, #000000).
+    - Bottom Answer Overlay: 50-70px above card bottom, plain white text, no boxes.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -643,25 +835,26 @@ class TVClueScreenWidget(QWidget):
         self.bg_color = QColor("#060CE9")
         self.bg_pixmap: Optional[QPixmap] = None
         self.asset_pixmap: Optional[QPixmap] = None
-        self.font_family = "Georgia"
-        self.font_size = 48
+        self.font_family = "ITC Korinna"
+        self.font_size = 50          # max point size for dynamic fitting
+        self.font_size_min = 18      # min point size
+        self.smooth_transform = True
 
-        # Lớp hiển thị đáp án tùy chọn (Bottom Answer Overlay)
-        self.answer_label = QLabel(self)
-        self.answer_label.setAlignment(Qt.AlignCenter)
-        self.answer_label.setWordWrap(True)
+                # Sony broadcast standard answer overlay - AutoFitLabel
+        self.answer_label = AutoFitLabel(max_point_size=32, min_point_size=14, parent=self)
         self.answer_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(0, 0, 0, 0.88);
-                color: #EAFF00;
-                font-family: Georgia;
-                font-size: 28px;
-                font-weight: 900;
-                border: 2px solid #EAFF00;
-                border-radius: 0px;
-                padding: 6px 20px;
+                background-color: transparent;
+                color: #ffffff;
+                border: none;
+                padding: 0px;
             }
         """)
+        ans_shadow = QGraphicsDropShadowEffect(self.answer_label)
+        ans_shadow.setBlurRadius(2)
+        ans_shadow.setOffset(2, 2)
+        ans_shadow.setColor(QColor("#000000"))
+        self.answer_label.setGraphicsEffect(ans_shadow)
         self.answer_label.setVisible(False)
 
     def set_clue(self, text: str, has_asset: bool = False, asset_path: str = ""):
@@ -674,9 +867,9 @@ class TVClueScreenWidget(QWidget):
         self.update()
 
     def set_answer_overlay(self, visible: bool, text: str = ""):
-        if visible:
-            display_text = f"ĐÁP ÁN: {str(text).upper()}" if text else "ĐÁP ÁN"
-            self.answer_label.setText(display_text)
+        if visible and text:
+                        # White text
+            self.answer_label.setText(str(text).upper())
             self.answer_label.setVisible(True)
             self.answer_label.raise_()
         else:
@@ -695,62 +888,102 @@ class TVClueScreenWidget(QWidget):
         self.font_size = size
         self.update()
 
+    def _fit_font_size(self, text: str, text_rect: QRect) -> int:
+        """Find optimal font size fitting text_rect using reverse search."""
+        best = self.font_size_min
+        for size in range(self.font_size, self.font_size_min - 1, -2):
+            f = QFont(self.font_family, size, QFont.Bold)
+            m = QFontMetrics(f)
+            b = m.boundingRect(
+                QRect(0, 0, text_rect.width(), 0),
+                Qt.AlignCenter | Qt.TextWordWrap,
+                text
+            )
+            if b.height() <= text_rect.height() and b.width() <= text_rect.width():
+                best = size
+                break
+        return best
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        if self.smooth_transform:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.setRenderHint(QPainter.TextAntialiasing)
 
         w, h = self.width(), self.height()
-        card_rect = QRect(0, 0, w, h)
+
+        # 1. Outer framing: Solid black #000000 (Broadcast letterbox/pillarbox)
+        painter.fillRect(QRect(0, 0, w, h), QColor("#000000"))
+
+        # 2. Blue clue card frame: FULL SCREEN (16:9 100% width/height)
+        card_w = w
+        card_h = h
+        card_x = 0
+        card_y = 0
+        card_rect = QRect(card_x, card_y, card_w, card_h)
 
         if self.bg_pixmap and not self.bg_pixmap.isNull():
-            draw_cover_image(painter, card_rect, self.bg_pixmap)
+            draw_cover_image(painter, card_rect, self.bg_pixmap, smooth=self.smooth_transform)
         else:
             painter.fillRect(card_rect, self.bg_color)
 
+        # 3. Render Clue content with dynamic font sizing
         if self.asset_pixmap and not self.asset_pixmap.isNull():
-            img_rect = QRect(60, 40, w - 120, int(h * 0.48))
-            text_rect = QRect(60, int(h * 0.52), w - 120, int(h * 0.38))
+            img_rect = QRect(card_x + 40, card_y + 30, card_w - 80, int(card_h * 0.50))
+            text_rect = QRect(card_x + 40, card_y + int(card_h * 0.54), card_w - 80, int(card_h * 0.40))
 
-            scaled_asset = self.asset_pixmap.scaled(img_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_asset = self.asset_pixmap.scaled(
+                img_rect.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation if self.smooth_transform else Qt.FastTransformation
+            )
             ax = img_rect.x() + (img_rect.width() - scaled_asset.width()) // 2
             ay = img_rect.y() + (img_rect.height() - scaled_asset.height()) // 2
             painter.drawPixmap(ax, ay, scaled_asset)
 
-            font = QFont(self.font_family, max(24, int(self.font_size * 0.72)), QFont.Bold)
+            dyn_size = self._fit_font_size(self.question_text, text_rect)
+            font = QFont(self.font_family, dyn_size, QFont.Bold)
             painter.setFont(font)
-            painter.setPen(QColor(0, 0, 0, 240))
-            painter.drawText(text_rect.adjusted(2, 2, 2, 2), Qt.AlignCenter | Qt.TextWordWrap, self.question_text)
+            # Sharp drop shadow (offset 3, 3)
+            painter.setPen(QColor(0, 0, 0, 255))
+            painter.drawText(text_rect.adjusted(3, 3, 3, 3), Qt.AlignCenter | Qt.TextWordWrap, self.question_text)
             painter.setPen(QColor("#ffffff"))
             painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, self.question_text)
         else:
-            text_rect = QRect(80, 50, w - 160, h - 140)
-            font = QFont(self.font_family, self.font_size, QFont.Bold)
+            text_rect = QRect(card_x + 50, card_y + 40, card_w - 100, card_h - 80)
+            dyn_size = self._fit_font_size(self.question_text, text_rect)
+            font = QFont(self.font_family, dyn_size, QFont.Bold)
             painter.setFont(font)
-            painter.setPen(QColor(0, 0, 0, 240))
-            painter.drawText(text_rect.adjusted(2, 2, 2, 2), Qt.AlignCenter | Qt.TextWordWrap, self.question_text)
+            # Sharp drop shadow (offset 3, 3)
+            painter.setPen(QColor(0, 0, 0, 255))
+            painter.drawText(text_rect.adjusted(3, 3, 3, 3), Qt.AlignCenter | Qt.TextWordWrap, self.question_text)
             painter.setPen(QColor("#ffffff"))
             painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, self.question_text)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         w, h = self.width(), self.height()
-        lbl_w = min(int(w * 0.85), 900)
-        lbl_h = 56
-        self.answer_label.setGeometry((w - lbl_w) // 2, h - 65 - lbl_h, lbl_w, lbl_h)
+        card_w = max(100, int(w * 0.82))
+        card_h = max(100, int(h * 0.84))
+        card_y = (h - card_h) // 2
+        lbl_w = min(int(card_w * 0.90), 1000)
+        lbl_h = max(60, int(card_h * 0.12))
+        # Positioned 50-70px above bottom edge of clue frame
+        lbl_y = card_y + card_h - 60 - lbl_h
+        self.answer_label.setGeometry((w - lbl_w) // 2, lbl_y, lbl_w, lbl_h)
 
 
 class TVFinalScreenWidget(QWidget):
     """
-    Quy trình Vòng Final Jeopardy chuẩn hóa (3 bước + Cross-fade Xanh -> Đỏ sau 15s):
-    - Bước 1 (trigger_final_step(1)): TV hiển thị ảnh Splash Final Logo phủ toàn màn hình (Full-Bleed Cover).
-    - Bước 2 (trigger_final_step(2)): TV chuyển sang màn hình phẳng hiển thị Tên Chủ Đề in hoa, căn giữa.
-    - Bước 3 (trigger_final_step(3)): TV mở màn hình Manh mối (Final Clue):
-      * 2 lớp nền xếp chồng: Đáy là ĐỎ, Trên là XANH (opacity=1.0).
-      * Bắt đầu đếm 30s think music.
-      * Sau đúng 15 giây: Animation hạ Opacity nền Xanh từ 1.0 về 0.0 trong 2500ms -> Lộ nền Đỏ kịch tính.
-    - Vinh danh Quán quân: ẨN HOÀN TOÀN TRÊN TV DISPLAY (chỉ hiện trên Host Controller).
+    Final Jeopardy Sequencer (3 Steps + 15s Blue-to-Red Cross-fade):
+    - Step 1 (trigger_final_step(1)): Full-bleed cover Final Jeopardy Splash Logo.
+    - Step 2 (trigger_final_step(2)): Flat card displaying Category Name in uppercase, centered.
+    - Step 3 (trigger_final_step(3)): Final Clue card with stacked backgrounds:
+      * Base background: RED, Overlay: BLUE (opacity=1.0).
+      * Starts 30s Think Music countdown.
+      * Exactly at 15s elapsed: Cross-fade animates Blue opacity from 1.0 to 0.0 over 2500ms -> Deep Red.
+    - Champion / Scoring reveal: STRICTLY HIDDEN ON TV (Host Controller only).
     """
     STEP_SPLASH = 1
     STEP_CATEGORY = 2
@@ -775,6 +1008,11 @@ class TVFinalScreenWidget(QWidget):
         self.countdown_timer.setInterval(100)
         self.countdown_timer.timeout.connect(self._on_countdown_tick)
 
+        # 15s Cross-fade timer
+        self.crossfade_timer = QTimer(self)
+        self.crossfade_timer.setSingleShot(True)
+        self.crossfade_timer.timeout.connect(self.start_crossfade)
+
         self._build_ui()
 
     def _build_ui(self):
@@ -793,18 +1031,9 @@ class TVFinalScreenWidget(QWidget):
         self.cat_layout.setContentsMargins(40, 40, 40, 40)
         self.cat_layout.setAlignment(Qt.AlignCenter)
 
-        self.cat_round_lbl = QLabel("VÒNG 3: FINAL JEOPARDY!", self.cat_card)
-        self.cat_round_lbl.setAlignment(Qt.AlignCenter)
-        self.cat_round_lbl.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFA500; border: none; background: transparent;")
-
-        self.cat_sub_lbl = QLabel("CHỦ ĐỀ:", self.cat_card)
-        self.cat_sub_lbl.setAlignment(Qt.AlignCenter)
-        self.cat_sub_lbl.setStyleSheet("font-size: 36px; font-weight: bold; color: #e6edf3; border: none; background: transparent;")
-
-        self.cat_name_lbl = QLabel("TÊN CHỦ ĐỀ", self.cat_card)
-        self.cat_name_lbl.setAlignment(Qt.AlignCenter)
-        self.cat_name_lbl.setWordWrap(True)
-        self.cat_name_lbl.setStyleSheet("font-size: 54px; font-weight: 900; color: #ffffff; border: none; background: transparent;")
+        self.cat_name_lbl = AutoFitLabel(max_point_size=92, min_point_size=36, parent=self.cat_card)
+        self.cat_name_lbl.setStyleSheet("font-weight: 900; color: #ffffff; border: none; background: transparent;")
+        self.cat_name_lbl.setFont(QFont("Georgia", 76, QFont.Bold))
         c_shadow = QGraphicsDropShadowEffect(self.cat_name_lbl)
         c_shadow.setBlurRadius(2)
         c_shadow.setOffset(2, 2)
@@ -832,6 +1061,7 @@ class TVFinalScreenWidget(QWidget):
         self.blue_layer.setGraphicsEffect(self.blue_opacity)
 
         # Foreground content (CHỈ HIỂN THỊ NỘI DUNG MANH MỐI, KHÔNG METADATA, KHÔNG THANH ĐEN)
+        # Foreground content: Clue text only, no metadata or bottom progress bar
         self.clue_fg = QWidget(self.clue_card)
         self.clue_fg.setStyleSheet(FLAT_CARD_STYLE)
         fg_layout = QVBoxLayout(self.clue_fg)
@@ -846,32 +1076,29 @@ class TVFinalScreenWidget(QWidget):
         self.progress_bar.setRange(0, 300)
         self.progress_bar.setValue(300)
 
-        self.clue_content_lbl = QLabel("CÂU HỎI MANH MỐI", self.clue_fg)
-        self.clue_content_lbl.setAlignment(Qt.AlignCenter)
-        self.clue_content_lbl.setWordWrap(True)
-        self.clue_content_lbl.setStyleSheet("font-size: 50px; font-weight: 900; color: #ffffff; border: none; background: transparent;")
+        self.clue_content_lbl = AutoFitLabel(max_point_size=56, min_point_size=20, parent=self.clue_fg)
+        self.clue_content_lbl.setStyleSheet("font-weight: 900; color: #ffffff; border: none; background: transparent;")
         clue_shadow = QGraphicsDropShadowEffect(self.clue_content_lbl)
         clue_shadow.setBlurRadius(2)
         clue_shadow.setOffset(2, 2)
         clue_shadow.setColor(QColor("#000000"))
         self.clue_content_lbl.setGraphicsEffect(clue_shadow)
 
-        # Lớp hiển thị đáp án tùy chọn (Bottom Answer Overlay)
-        self.answer_label = QLabel(self.clue_fg)
-        self.answer_label.setAlignment(Qt.AlignCenter)
-        self.answer_label.setWordWrap(True)
+                # Sony broadcast standard answer overlay - AutoFitLabel
+        self.answer_label = AutoFitLabel(max_point_size=32, min_point_size=14, parent=self.clue_fg)
         self.answer_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(0, 0, 0, 0.88);
-                color: #EAFF00;
-                font-family: Georgia;
-                font-size: 28px;
-                font-weight: 900;
-                border: 2px solid #EAFF00;
-                border-radius: 0px;
-                padding: 6px 20px;
+                background-color: transparent;
+                color: #ffffff;
+                border: none;
+                padding: 0px;
             }
         """)
+        ans_shadow = QGraphicsDropShadowEffect(self.answer_label)
+        ans_shadow.setBlurRadius(2)
+        ans_shadow.setOffset(2, 2)
+        ans_shadow.setColor(QColor("#000000"))
+        self.answer_label.setGraphicsEffect(ans_shadow)
         self.answer_label.setVisible(False)
 
         fg_layout.addWidget(self.clue_content_lbl, 1)
@@ -879,9 +1106,8 @@ class TVFinalScreenWidget(QWidget):
         self._update_visibility()
 
     def set_answer_overlay(self, visible: bool, text: str = ""):
-        if visible:
-            display_text = f"ĐÁP ÁN: {str(text).upper()}" if text else "ĐÁP ÁN"
-            self.answer_label.setText(display_text)
+        if visible and text:
+            self.answer_label.setText(str(text).upper())
             self.answer_label.setVisible(True)
             self.answer_label.raise_()
         else:
@@ -912,6 +1138,10 @@ class TVFinalScreenWidget(QWidget):
     def set_step(self, step: int, data: dict):
         self.step = step
         self.answer_label.setVisible(False)
+        self.crossfade_timer.stop()
+        if hasattr(self, "crossfade_anim") and self.crossfade_anim.state() == QPropertyAnimation.Running:
+            self.crossfade_anim.stop()
+
         if step == self.STEP_SPLASH:
             self.countdown_timer.stop()
             self._update_visibility()
@@ -932,10 +1162,22 @@ class TVFinalScreenWidget(QWidget):
             self._update_visibility()
 
             # Trigger 2.5s Cross-fade after 15 seconds
-            QTimer.singleShot(15000, self.start_crossfade)
+            self.crossfade_timer.start(15000)
+
+    def restart_final_countdown(self):
+        """Reset to Blue base immediately, restart 30s countdown, schedule 15s crossfade."""
+        if hasattr(self, "crossfade_anim") and self.crossfade_anim.state() == QPropertyAnimation.Running:
+            self.crossfade_anim.stop()
+        self.blue_opacity.setOpacity(1.0)
+        self.countdown_timer.stop()
+        self.countdown_ms = 30000
+        self.progress_bar.setValue(300)
+        self.countdown_timer.start()
+        self.crossfade_timer.stop()
+        self.crossfade_timer.start(15000)
 
     def start_crossfade(self):
-        """Kích hoạt hiệu ứng chuyển nền từ XANH sang ĐỎ trong 2500ms."""
+        """Trigger smooth crossfade animation from Blue to Red over 2500ms."""
         if self.step != self.STEP_CLUE:
             return
         if hasattr(self, "crossfade_anim") and self.crossfade_anim.state() == QPropertyAnimation.Running:
@@ -983,7 +1225,7 @@ class TVFinalScreenWidget(QWidget):
 # =============================================================================
 
 class TVDisplayWindow(QMainWindow):
-    """Cửa sổ hiển thị Màn hình TV Studio / Video Wall chuẩn phát sóng."""
+    """Broadcast TV Studio / Video Wall secondary display window."""
 
     INDEX_BOARD = 0
     INDEX_CATEGORY_REVEAL = 1
@@ -1010,7 +1252,7 @@ class TVDisplayWindow(QMainWindow):
 
         # Board State
         self.current_round = 1
-        self.category_names = [f"CHỦ ĐỀ {i+1}" for i in range(6)]
+        self.category_names = [f"CATEGORY {i+1}" for i in range(6)]
         self.cells: Dict[Tuple[int, int], TVClueCell] = {}
         self.cat_cells = []
         self.current_opened_coords = None
@@ -1039,8 +1281,11 @@ class TVDisplayWindow(QMainWindow):
         # Zoom overlay widget
         self.point_zoom_widget = TVPointZoomWidget(self)
 
+        # PowerPoint 3D horizontal card flip transition overlay widget
+        self.card_flip_widget = TVCardFlipTransitionWidget(self)
 
-        self.stack.setCurrentIndex(self.INDEX_BOARD)
+
+        self.stack.setCurrentIndex(self.INDEX_STANDBY_NORMAL)
 
         # Register EventBus Handlers
         self._register_event_bus()
@@ -1060,18 +1305,26 @@ class TVDisplayWindow(QMainWindow):
 
     @Slot()
     def toggle_fullscreen(self):
-        """Chuyển đổi tức thì giữa Borderless Fullscreen và Windowed mode cho OBS."""
+        """Instant toggle between Borderless Fullscreen and Windowed mode for OBS capture."""
         if self.isFullScreen():
             self.showNormal()
         else:
             self.showFullScreen()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w, h = self.width(), self.height()
+        if hasattr(self, "point_zoom_widget") and self.point_zoom_widget.isVisible():
+            self.point_zoom_widget.setGeometry(0, 0, w, h)
+        if hasattr(self, "card_flip_widget") and self.card_flip_widget.isVisible():
+            self.card_flip_widget.setGeometry(0, 0, w, h)
 
     # -------------------------------------------------------------------------
     # UI PAGE BUILDERS
     # -------------------------------------------------------------------------
 
     def _build_page_board(self):
-        """Ma trận 6x6 (1 hàng chủ đề + 5 hàng điểm) với Bezel đen công nghiệp."""
+        """6x6 Matrix (1 category header row + 5 point rows) with industrial black bezels."""
         self.board_container = QWidget()
         self.board_container.setStyleSheet(f"background-color: {self.bezel_color.name()};")
 
@@ -1098,29 +1351,29 @@ class TVDisplayWindow(QMainWindow):
         self.stack.addWidget(self.board_container)  # INDEX_BOARD = 0
 
     def _build_page_category_reveal(self):
-        """Category Reveal Engine 3 lớp."""
+        """Category Reveal Engine (3 layers: background, title, logo overlay)."""
         self.cat_reveal_widget = TVCategoryRevealWidget(self)
         self.cat_reveal_widget.set_categories(self.category_names)
         self.stack.addWidget(self.cat_reveal_widget)  # INDEX_CATEGORY_REVEAL = 1
 
     def _build_page_daily_double(self):
-        """Màn hình Daily Double Splash Image Graphic (Full-Bleed Cover)."""
+        """Daily Double Splash Image Graphic (Full-Bleed Cover)."""
         self.dd_splash_widget = _CoverImageWidget(self)
         self.dd_splash_widget.fallback_text = "DAILY DOUBLE"
         self.stack.addWidget(self.dd_splash_widget)  # INDEX_DAILY_DOUBLE = 2
 
     def _build_page_clean_clue(self):
-        """Khung câu hỏi chuẩn truyền hình phẳng 100% (Flat Design)."""
+        """Clean clue card screen (Flat 100% Broadcast Standard)."""
         self.clue_screen_widget = TVClueScreenWidget(self)
         self.stack.addWidget(self.clue_screen_widget)  # INDEX_QUESTION = 3
 
     def _build_page_final(self):
-        """Vòng 3 Final Jeopardy Sequencer (3 bước + Cross-fade Xanh -> Đỏ)."""
+        """Final Jeopardy Sequencer (3 steps + 15s Blue-to-Red cross-fade)."""
         self.final_screen_widget = TVFinalScreenWidget(self)
         self.stack.addWidget(self.final_screen_widget)  # INDEX_FINAL = 4
 
     def _build_page_standby(self):
-        """Màn hình Chờ Thường (Standard Standby Wallpaper Full-Bleed 100%)."""
+        """Standard Standby Wallpaper Screen (Full-Bleed 100%)."""
         self.standby_normal_widget = _CoverImageWidget(self)
         self.standby_normal_widget.fallback_text = "JEOPARDY!"
         self.stack.addWidget(self.standby_normal_widget)  # INDEX_STANDBY_NORMAL = 5
@@ -1174,15 +1427,56 @@ class TVDisplayWindow(QMainWindow):
 
     @Slot()
     def show_blank_board(self):
-        """Bảng trống (chỉ hiện bezel và ô trơn)."""
+        """Blank Board State: Red Zone (Row 0) preserves custom header logo; 30 clue cells clear to blank fill."""
         self.fill_timer.stop()
         self.stack.setCurrentIndex(self.INDEX_BOARD)
+        for cell in self.cat_cells:
+            cell.set_revealed(False)
+            cell.set_mosaic(False)
         for cell in self.cells.values():
+            cell.set_mosaic(False)
             cell.set_state(TVClueCell.STATE_BLANK)
+
+    @Slot(int, int)
+    def handle_category_step(self, action: int, col_index: int):
+        """Step sequencer for category reveals:
+        action: 1=Show Logo covering column, 2=Reveal Title, 3=Slide Next, 4=Return to Board
+        """
+        if action == 1:
+            self.handle_category_show_logo(col_index)
+        elif action == 2:
+            self.handle_category_fade_logo()
+        elif action == 3:
+            self.handle_category_slide_next(auto_fade=False)
+        elif action == 4:
+            self.handle_cancel_category_reveal()
+
+    @Slot()
+    def handle_restart_final_timer(self):
+        """Restarts 30s Final Jeopardy timer, resets audio, restores Blue base."""
+        if self.stack.currentIndex() == self.INDEX_FINAL:
+            self.final_screen_widget.restart_final_countdown()
+            event_bus.play_sound_event.emit("think_30s")
+
+    @Slot(bool)
+    def handle_toggle_tv_window(self, visible: bool):
+        """Shows or hides the secondary TV window from Host Controller."""
+        if visible:
+            self.show()
+            self.raise_()
+        else:
+            self.hide()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key_F11:
+            self.toggle_fullscreen()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     @Slot()
     def start_board_fill(self):
-        """Lật mở ngẫu nhiên 30 ô. Chỉ phát 1 file âm thanh mở bảng duy nhất khi bắt đầu."""
+        """Randomly reveal 30 point cells. Plays single board fill sound effect upon start."""
         self.show_blank_board()
         all_coords = [(c, r) for c in range(6) for r in range(5)]
         random.shuffle(all_coords)
@@ -1209,7 +1503,7 @@ class TVDisplayWindow(QMainWindow):
 
     @Slot(int)
     def handle_category_show_logo(self, col_index: int = 0):
-        """Hành động 1: Mở cột tương ứng với Logo che kín tên chủ đề, đứng im chờ Host."""
+        """Action 1: Open category column with logo covering title, awaiting Host command."""
         cats = [self.cat_cells[i].title for i in range(6)]
         self.cat_reveal_widget.set_categories(cats)
         self.stack.setCurrentIndex(self.INDEX_CATEGORY_REVEAL)
@@ -1217,19 +1511,19 @@ class TVDisplayWindow(QMainWindow):
 
     @Slot()
     def handle_category_fade_logo(self):
-        """Hành động 2: Kích hoạt fade-out mở tên chủ đề trong 500ms."""
+        """Action 2: Trigger fade-out animation to reveal category title over 500ms."""
         if self.stack.currentIndex() == self.INDEX_CATEGORY_REVEAL:
             self.cat_reveal_widget.fade_logo()
 
-    @Slot()
-    def handle_category_slide_next(self):
-        """Hành động 3: Trượt sang cột tiếp theo ở trạng thái Logo che kín."""
+    @Slot(bool)
+    def handle_category_slide_next(self, auto_fade: bool = False):
+        """Action 3: Slide to next category column (optionally auto-fading logo)."""
         if self.stack.currentIndex() == self.INDEX_CATEGORY_REVEAL:
-            self.cat_reveal_widget.slide_next()
+            self.cat_reveal_widget.slide_next(auto_fade=auto_fade)
 
     @Slot(int)
     def handle_category_reveal_step(self, step: int):
-        """Tương thích ngược: điều khiển bước 0 (Logo), 1 (Fade), 2 (Slide next)."""
+        """Backward compatibility: control step 0 (Logo), 1 (Fade), 2 (Slide next)."""
         if self.stack.currentIndex() != self.INDEX_CATEGORY_REVEAL:
             cats = [self.cat_cells[i].title for i in range(6)]
             self.cat_reveal_widget.set_categories(cats)
@@ -1240,17 +1534,22 @@ class TVDisplayWindow(QMainWindow):
     @Slot()
     def handle_category_next(self):
         self.handle_category_slide_next()
+        self.handle_category_slide_next(auto_fade=False)
 
     @Slot()
     def handle_cancel_category_reveal(self):
+        """Complete or cancel category reveal: return to board and reveal all categories."""
         if self.stack.currentIndex() == self.INDEX_CATEGORY_REVEAL:
             self.cat_reveal_widget.cancel()
             self.stack.setCurrentIndex(self.INDEX_BOARD)
+            # Ensure all 6 category titles are displayed on the board
+            for cell in self.cat_cells:
+                cell.set_revealed(True)
 
     # --- POINT ZOOM TRANSITION & 2-STEP AIRING FLOW ---
     @Slot(dict)
     def handle_request_clue_zoom(self, payload: dict):
-        """Nhịp 1: Kích hoạt zoom phóng to số điểm ô được chọn ra toàn màn hình."""
+        """Step 1: Expand selected point tile or Daily Double splash to full screen."""
         self.pending_clue_payload = dict(payload)
         col = payload.get("col_index", 0)
         row = payload.get("row_index", 0)
@@ -1289,7 +1588,7 @@ class TVDisplayWindow(QMainWindow):
         self.zoom_anim.start()
 
     def _on_zoom_animation_finished(self):
-        """Nhịp 1 hoàn tất: TV dừng lại giữ nguyên trạng thái (Zoom Điểm hoặc Daily Double)."""
+        """Step 1 complete: Hold full screen on point value or Daily Double splash."""
         if not self.pending_clue_payload:
             return
 
@@ -1303,23 +1602,57 @@ class TVDisplayWindow(QMainWindow):
             self.show_daily_double_splash(splash_path)
             event_bus.play_sound_event.emit("daily_double")
         else:
-            # Giữ nguyên số điểm khổng lồ lấp kín toàn màn hình TV
+            # Hold giant point value full-screen
             self.point_zoom_widget.setGeometry(0, 0, self.width(), self.height())
             self.point_zoom_widget.show()
             self.point_zoom_widget.raise_()
 
     @Slot()
     def handle_clue_reveal(self):
-        """Nhịp 2: Sau khi Host bấm xác nhận mở câu hỏi, TV mới chính thức chuyển cảnh sang thẻ câu hỏi."""
-        if self.pending_clue_payload:
+        """Step 2: Airing command to reveal clue text.
+        If current view is Daily Double (or payload is Daily Double), execute PowerPoint 3D horizontal card flip.
+        """
+        if not self.pending_clue_payload:
+            return
+
+        if self.stack.currentIndex() == self.INDEX_DAILY_DOUBLE or self.pending_clue_payload.get("is_daily_double"):
+            self._trigger_daily_double_flip_transition()
+        else:
             self.show_question(self.pending_clue_payload)
+
+    def _trigger_daily_double_flip_transition(self):
+        """Executes PowerPoint-style 3D horizontal card flip from Daily Double to Clue Question."""
+        w, h = max(400, self.width()), max(300, self.height())
+        front_pix = QPixmap(w, h)
+        front_pix.fill(QColor("#000000"))
+        self.dd_splash_widget.render(front_pix)
+
+        payload = self.pending_clue_payload
+        raw_text = payload.get("question_text", "")
+        has_asset = payload.get("has_asset", False)
+        asset_path = payload.get("asset_path", "")
+
+        self.clue_screen_widget.resize(w, h)
+        self.clue_screen_widget.set_clue(raw_text, has_asset, asset_path)
+
+        back_pix = QPixmap(w, h)
+        back_pix.fill(QColor("#000000"))
+        self.clue_screen_widget.render(back_pix)
+
+        self.card_flip_widget.setGeometry(0, 0, w, h)
+
+        def _on_flip_done():
+            self.show_question(self.pending_clue_payload)
+
+        self.card_flip_widget.start_flip(front_pix, back_pix, duration=650, finished_callback=_on_flip_done)
+        self.card_flip_widget.start_flip(front_pix, back_pix, duration=1200, finished_callback=_on_flip_done)
 
     handle_clue_zoom = handle_request_clue_zoom
 
 
     @Slot(str)
     def show_daily_double_splash(self, splash_path: str):
-        """Hiển thị đồ họa Daily Double của người dùng (Full-Bleed Cover)."""
+        """Display Daily Double splash graphic (Full-Bleed Cover)."""
         if splash_path and os.path.exists(splash_path):
             pix = QPixmap(splash_path)
             self.dd_splash_widget.set_pixmap(pix)
@@ -1359,7 +1692,7 @@ class TVDisplayWindow(QMainWindow):
 
     @Slot(bool, str)
     def handle_toggle_tv_answer(self, is_visible: bool, answer_text: str = ""):
-        """Bật/tắt thanh hiển thị đáp án tùy chọn (Bottom Answer Overlay)."""
+        """Toggle optional bottom answer overlay display."""
         curr = self.stack.currentIndex()
         if curr == self.INDEX_QUESTION:
             self.clue_screen_widget.set_answer_overlay(is_visible, answer_text)
@@ -1369,6 +1702,7 @@ class TVDisplayWindow(QMainWindow):
     handle_toggle_answer = handle_toggle_tv_answer
 
     # --- STANDBY ENGINE (NORMAL & MOSAIC 36 Ô) ---
+    # STANDBY ENGINE (NORMAL & MOSAIC 36 CELLS)
 
     @Slot(str)
     def handle_standby_mode(self, mode: str):
@@ -1382,6 +1716,8 @@ class TVDisplayWindow(QMainWindow):
         else: # "off"
             self._set_mosaic_mode(False)
             self.stack.setCurrentIndex(self.INDEX_BOARD)
+            for cell in self.cat_cells:
+                cell.set_revealed(True)
 
     def _set_mosaic_mode(self, enabled: bool):
         pix = self.standby_pixmap if enabled else None
@@ -1392,22 +1728,24 @@ class TVDisplayWindow(QMainWindow):
 
     @Slot()
     def handle_reset_game_state(self):
-        """Đặt lại toàn bộ trạng thái TV về ban đầu."""
+        """Reset full TV display state to initial defaults."""
         self.close_question()
         self._setup_default_board()
 
     # --- FINAL JEOPARDY TRANSITIONS (3 STEPS + 15S CROSS-FADE) ---
     @Slot(int, dict)
     def handle_final_step(self, step: int, data: dict):
-        """Điều phối 3 bước Vòng Final Jeopardy. Bảng điểm quán quân chỉ hiện trên Host, ẩn 100% trên TV."""
+        """Coordinate Final Jeopardy sequence. Winner summary strictly kept on Host, hidden on TV."""
+        if step == 2:
+            event_bus.play_sound_event.emit("category_intro")
         if step in (1, 2, 3):
             self.stack.setCurrentIndex(self.INDEX_FINAL)
             self.final_screen_widget.set_step(step, data)
-        # Nếu step >= 4 (hoặc tổng kết điểm): KHÔNG hiển thị màn hình vinh danh lên TV!
+        # Step >= 4 (Final scores): Never display winner podiums on TV!
 
     @Slot()
     def handle_final_crossfade(self):
-        """Kích hoạt đổi nền Xanh -> Đỏ."""
+        """Trigger Blue to Red background crossfade."""
         if self.stack.currentIndex() == self.INDEX_FINAL:
             self.final_screen_widget.start_crossfade()
 
@@ -1426,10 +1764,14 @@ class TVDisplayWindow(QMainWindow):
                 if cell:
                     cell.set_points(pts)
                     cell.set_state(TVClueCell.STATE_POINTS)
+        if round_id in (1, 2):
+            self.stack.setCurrentIndex(self.INDEX_BOARD)
+            for cell in self.cat_cells:
+                cell.set_revealed(True)
 
     @Slot()
     def reload_theme_from_disk(self):
-        """Tải lại theme.xml từ ổ đĩa và áp dụng ngay lập tức."""
+        """Reload theme.xml from disk and apply immediately."""
         self.theme = ThemeConfigManager.load_theme_xml()
         self.apply_theme_config(self.theme)
 
@@ -1504,7 +1846,7 @@ class TVDisplayWindow(QMainWindow):
         self.cat_reveal_widget.set_logo_path(logo_cand)
         self.cat_reveal_widget.set_card_style(rev_p, std_col)
 
-        # 7. Standby Screen Wallpaper (Thường & Mosaic 36 ô)
+        # Standby Screen Wallpaper (Static & Mosaic 36)
         sb_img = theme_data.get("standby_screen", {}).get("image_path", "")
         if sb_img and os.path.exists(sb_img):
             self.standby_pixmap = QPixmap(sb_img)
@@ -1517,6 +1859,69 @@ class TVDisplayWindow(QMainWindow):
         sounds_dict = theme_data.get("sounds", {})
         if sounds_dict:
             self.audio_manager.load_from_dict(sounds_dict)
+
+    # -------------------------------------------------------------------------
+    # PERFORMANCE PROFILES & DATA SYNCHRONIZATION
+    # -------------------------------------------------------------------------
+
+    @Slot(str)
+    def apply_performance_profile(self, profile_mode: str):
+        """Apply performance profile: basic, smooth, ultra."""
+        self.performance_profile = (profile_mode or "smooth").lower()
+        if self.performance_profile == "ultra":
+            try:
+                from PySide6.QtOpenGLWidgets import QOpenGLWidget
+                if not hasattr(self, "_gl_widget"):
+                    self._gl_widget = QOpenGLWidget(self)
+                    self._gl_widget.lower()
+                    self._gl_widget.resize(self.size())
+            except Exception as e:
+                print(f"[TVDisplay] Ultra OpenGL notice: {e}")
+            self.animation_fps = 60
+            self.smooth_transform = True
+        elif self.performance_profile == "smooth":
+            self.animation_fps = 60
+            self.smooth_transform = True
+        else:  # "basic"
+            self.animation_fps = 30
+            self.smooth_transform = False
+
+        # Update rendering hints for child components
+        if hasattr(self, "clue_screen_widget"):
+            self.clue_screen_widget.smooth_transform = self.smooth_transform
+        if hasattr(self, "cat_reveal_widget"):
+            self.cat_reveal_widget.card_a.inner_box.smooth_transform = self.smooth_transform
+            self.cat_reveal_widget.card_b.inner_box.smooth_transform = self.smooth_transform
+        self.update()
+
+    @Slot(list)
+    def handle_sync_categories(self, categories: list):
+        """Synchronizes exactly 6 categories from Host Controller to TV board and reveal widgets."""
+        self.category_names = list(categories)
+        while len(self.category_names) < 6:
+            self.category_names.append(f"CATEGORY {len(self.category_names)+1}")
+        for i in range(6):
+            if i < len(self.cat_cells):
+                self.cat_cells[i].set_title(self.category_names[i])
+                self.cat_cells[i].set_revealed(True)
+        if hasattr(self, "cat_reveal_widget"):
+            self.cat_reveal_widget.set_categories(self.category_names)
+
+    @Slot(list)
+    def handle_sync_board_state(self, board_items: list):
+        """Synchronizes state of 30 clue cells from Host to TV display."""
+        for item in board_items:
+            c = item.get("col_index", 0)
+            r = item.get("row_index", 0)
+            pts = item.get("points", 0)
+            is_used = bool(item.get("is_used", 0))
+            cell = self.cells.get((c, r))
+            if cell:
+                cell.set_points(pts)
+                if is_used:
+                    cell.set_state(TVClueCell.STATE_USED)
+                else:
+                    cell.set_state(TVClueCell.STATE_POINTS)
 
     # -------------------------------------------------------------------------
     # EVENT BUS INTEGRATION
@@ -1546,7 +1951,14 @@ class TVDisplayWindow(QMainWindow):
         event_bus.start_final_crossfade.connect(self.handle_final_crossfade)
         event_bus.update_theme_config.connect(self.apply_theme_config)
         event_bus.reload_theme_config.connect(self.reload_theme_from_disk)
+        event_bus.trigger_category_step.connect(self.handle_category_step)
+        event_bus.restart_final_timer.connect(self.handle_restart_final_timer)
+        event_bus.toggle_tv_window.connect(self.handle_toggle_tv_window)
+        event_bus.set_tv_fullscreen.connect(self.toggle_fullscreen)
         event_bus.set_display_fullscreen_toggle.connect(self.toggle_fullscreen)
+        event_bus.sync_categories_to_tv.connect(self.handle_sync_categories)
+        event_bus.sync_board_state_to_tv.connect(self.handle_sync_board_state)
+        event_bus.set_performance_profile.connect(self.apply_performance_profile)
 
 
 

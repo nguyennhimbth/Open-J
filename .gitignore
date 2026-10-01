@@ -24,6 +24,7 @@ htmlcov/
 scratch/
 renders/
 *.log
+REFERENCE/
 
 # Database & Documentation
 questions.db/
