@@ -1,16 +1,18 @@
 """Open-J: Host Controller Dashboard.
 Main broadcast control console for Jeopardy! game show host and studio operator.
-Built with PySide6, SQLite, XML, and decoupled event-bus architecture.
-Adheres strictly to official Jeopardy! rules (Season 40 & 41 standard).
+Includes:
+- Inline Daily Double Contestant & Wager Panel before 3D Flip Clue Reveal (Requirement #8)
+- Clean 3D Flip trigger without premature question background bleed (Requirement #8)
+- Final Jeopardy Replay, Reset & Database/Manual Override Engine (Requirement #10)
+- Top-ribbon Intro Video -> Standby Merge & Outro Music broadcast controls (Requirement #7)
+- Synchronized individual audio event bindings (Requirement #7)
 """
 
 import os
 import sys
 import sqlite3
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -62,10 +64,6 @@ from ui.audio_manager import AudioManager
 from ui.theme_manager import ThemePackageEngine, ThemeConfigManager, AssetRenderer
 from ui.settings_dialog import TVBezelPreviewWidget, SettingsDialog
 
-
-# =============================================================================
-# STYLESHEET CONSTANTS (FLAT BROADCAST 2026 DARK THEME)
-# =============================================================================
 
 APP_STYLE = """
 QMainWindow, QDialog {
@@ -186,10 +184,6 @@ QDockWidget::title {
 """
 
 
-# =============================================================================
-# MAIN CONTROLLER WINDOW
-# =============================================================================
-
 class HostControllerWindow(QMainWindow):
     """Broadcast-standard Host and Studio Operator Console."""
 
@@ -206,7 +200,6 @@ class HostControllerWindow(QMainWindow):
         # Core Engines
         if q_engine is None:
             q_engine = QuestionEngine(self.db_path)
-            q_engine.seed_sample_data(force_reset=False)
         self.q_engine = q_engine
 
         self.contestants = {
@@ -219,7 +212,10 @@ class HostControllerWindow(QMainWindow):
             s_engine = ScoreEngine([self.contestants["p1"]["name"], self.contestants["p2"]["name"], self.contestants["p3"]["name"]])
         self.s_engine = s_engine
 
+        # Theme & Singleton Audio Manager
+        self.theme = ThemeConfigManager.load_theme_xml()
         self.audio_manager = AudioManager(parent=self)
+        self.audio_manager.load_from_dict(self.theme.get("sounds", {}))
 
         # Internal State & Progression Lock
         self.current_round = 1
@@ -231,23 +227,23 @@ class HostControllerWindow(QMainWindow):
         self.category_names = [f"CATEGORY {i+1}" for i in range(6)]
         self.intro_col_index = 0
 
-        # Theme State
-        self.theme = ThemeConfigManager.load_theme_xml()
-
-        # Final Jeopardy State
+        # Final Jeopardy State & Multi-Clue Pool
         self.final_clue_data = None
+        self.final_db_clues_list = []
+        self.final_db_clue_index = 0
         self.final_wagers = {"p1": 0, "p2": 0, "p3": 0}
         self.final_timer = QTimer(self)
         self.final_timer_seconds = 30
         self.final_timer.timeout.connect(self._on_final_timer_tick)
 
-        # Buzzer & 5-Second Countdown State (Lockout Timing)
+        # Buzzer & 5-Second Countdown State
         self.buzzer_locked = True
         self.buzzer_active_player = None
         self.excluded_buzzers = set()
         self.tv_answer_visible = False
         self.is_final_answer_visible = False
         self._pending_dd_wager = None
+        self._dd_wager_locked = False
         self.host_timer_5s = QTimer(self)
         self.host_timer_5s.setInterval(100)
         self.host_timer_5s.timeout.connect(self._on_host_timer_5s_tick)
@@ -267,7 +263,6 @@ class HostControllerWindow(QMainWindow):
         self._refresh_database_table()
 
     def _create_menu_bar(self):
-        """Standard broadcast menu bar."""
         menu_bar = self.menuBar()
         menu_bar.setStyleSheet("""
             QMenuBar {
@@ -337,20 +332,20 @@ class HostControllerWindow(QMainWindow):
         # 3. Settings Menu
         menu_settings = menu_bar.addMenu("Settings")
 
-        act_config = QAction("Visuals & Sound Settings...", self)
+        act_config = QAction("Visuals, Fonts, Animations & Sound Settings...", self)
         act_config.triggered.connect(self._open_settings_dialog)
         menu_settings.addAction(act_config)
 
-        menu_perf = menu_settings.addMenu("Graphics Profile")
+        menu_perf = menu_settings.addMenu("Graphics Profile (OpenGL)")
+        act_perf_ultra = QAction("Studio Max (OpenGL GPU + 4x MSAA + VSync)", self)
+        act_perf_ultra.triggered.connect(lambda: self._set_perf_profile("ultra"))
+        act_perf_smooth = QAction("Smooth (60 FPS Cached)", self)
+        act_perf_smooth.triggered.connect(lambda: self._set_perf_profile("smooth"))
         act_perf_basic = QAction("Power Saver (30 FPS)", self)
         act_perf_basic.triggered.connect(lambda: self._set_perf_profile("basic"))
-        act_perf_smooth = QAction("Smooth (60 FPS)", self)
-        act_perf_smooth.triggered.connect(lambda: self._set_perf_profile("smooth"))
-        act_perf_ultra = QAction("Studio Max (OpenGL GPU)", self)
-        act_perf_ultra.triggered.connect(lambda: self._set_perf_profile("ultra"))
-        menu_perf.addAction(act_perf_basic)
-        menu_perf.addAction(act_perf_smooth)
         menu_perf.addAction(act_perf_ultra)
+        menu_perf.addAction(act_perf_smooth)
+        menu_perf.addAction(act_perf_basic)
 
         menu_settings.addSeparator()
 
@@ -399,6 +394,7 @@ class HostControllerWindow(QMainWindow):
         self._update_live_score_display()
         self._load_board_for_round(1)
         self._load_final_jeopardy_data()
+        self._reset_final_jeopardy_sequence(keep_clue=True)
         self._reset_buzzers()
         event_bus.reset_game_state.emit()
         self.tabs.setCurrentIndex(0)
@@ -420,6 +416,7 @@ class HostControllerWindow(QMainWindow):
 
     def _set_perf_profile(self, profile: str):
         self.theme["performance_profile"] = profile
+        ThemeConfigManager.save_theme_xml(self.theme)
         event_bus.set_performance_profile.emit(profile)
         QMessageBox.information(self, "Graphics Profile", f"Graphics profile set to: {profile}")
 
@@ -461,14 +458,13 @@ class HostControllerWindow(QMainWindow):
             event.ignore()
 
     def _build_top_header(self):
-        """Unified, compact top ribbon consolidating Standby modes and Round coordination."""
+        """Unified top ribbon consolidating Standby, Intro Video Merge, Outro Music, and Round coordination."""
         header_widget = QWidget()
         header_widget.setStyleSheet("background-color: #161b22; border-bottom: 1px solid #30363d;")
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(16, 8, 16, 8)
-        header_layout.setSpacing(12)
+        header_layout.setSpacing(10)
 
-        # Left branding
         title_lbl = QLabel("OPEN-J | CONTROLLER")
         title_lbl.setStyleSheet("font-size: 15px; font-weight: 900; color: #58a6ff; letter-spacing: 1px;")
         header_layout.addWidget(title_lbl)
@@ -478,19 +474,45 @@ class HostControllerWindow(QMainWindow):
         sep1.setStyleSheet("color: #30363d;")
         header_layout.addWidget(sep1)
 
-        # Commercial Break (Standby Waiting Screen) Controls
+        # Commercial Break / Standby Waiting Screen Button
         self._break_active = False
-        self.btn_commercial_break = QPushButton("COMMERCIAL BREAK (WAITING SCREEN)")
-        self.btn_commercial_break.setToolTip("Toggle commercial break waiting screen on TV display")
+        self.btn_commercial_break = QPushButton("CHẾ ĐỘ CHỜ / QUẢNG CÁO (STANDBY)")
+        self.btn_commercial_break.setToolTip("Toggle static standby waiting screen on TV display")
         self.btn_commercial_break.setStyleSheet("""
             QPushButton {
                 background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-                font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
             }
             QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
         """)
         self.btn_commercial_break.clicked.connect(self._on_toggle_commercial_break)
         header_layout.addWidget(self.btn_commercial_break)
+
+        # Requirement #7: Intro Video -> Standby Merge Button
+        self.btn_play_intro_video = QPushButton("▶ INTRO VIDEO")
+        self.btn_play_intro_video.setToolTip("Play Intro Video on TV then smoothly merge into Static Standby Wallpaper")
+        self.btn_play_intro_video.setStyleSheet("""
+            QPushButton {
+                background-color: #1f6feb; border: 1px solid #388bfd; color: #ffffff;
+                font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #388bfd; }
+        """)
+        self.btn_play_intro_video.clicked.connect(self._on_top_play_intro_video)
+        header_layout.addWidget(self.btn_play_intro_video)
+
+        # Requirement #7: Outro Music on Static Standby Button
+        self.btn_play_outro_music = QPushButton("🎵 OUTRO MUSIC")
+        self.btn_play_outro_music.setToolTip("Show Static Standby Wallpaper on TV and play Outro Music")
+        self.btn_play_outro_music.setStyleSheet("""
+            QPushButton {
+                background-color: #8957e5; border: 1px solid #a371f7; color: #ffffff;
+                font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #a371f7; }
+        """)
+        self.btn_play_outro_music.clicked.connect(self._on_top_play_outro_music)
+        header_layout.addWidget(self.btn_play_outro_music)
 
         header_layout.addStretch()
 
@@ -499,7 +521,6 @@ class HostControllerWindow(QMainWindow):
         sep2.setStyleSheet("color: #30363d;")
         header_layout.addWidget(sep2)
 
-        # Merged Round Ribbon (Round 1, Round 2, Round 3 in compact button group)
         lbl_round_tag = QLabel("ROUND:")
         lbl_round_tag.setStyleSheet("font-size: 11px; font-weight: 800; color: #8b949e;")
         header_layout.addWidget(lbl_round_tag)
@@ -529,7 +550,6 @@ class HostControllerWindow(QMainWindow):
         self.header_widget = header_widget
 
     def _on_toggle_commercial_break(self):
-        """Toggle commercial break standby screen on TV display."""
         if not getattr(self, "_break_active", False):
             self._break_active = True
             event_bus.trigger_standby_mode.emit("normal")
@@ -537,24 +557,75 @@ class HostControllerWindow(QMainWindow):
             self.btn_commercial_break.setStyleSheet("""
                 QPushButton {
                     background-color: #238636; border: 1px solid #2ea043; color: #ffffff;
-                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                    font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
                 }
                 QPushButton:hover { background-color: #2ea043; }
             """)
         else:
             self._break_active = False
+            event_bus.stop_standby_media.emit()
             event_bus.trigger_standby_mode.emit("off")
-            self.btn_commercial_break.setText("COMMERCIAL BREAK (WAITING SCREEN)")
+            self.btn_commercial_break.setText("CHẾ ĐỘ CHỜ / QUẢNG CÁO (STANDBY)")
             self.btn_commercial_break.setStyleSheet("""
                 QPushButton {
                     background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                    font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
                 }
                 QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
             """)
 
-    def _open_settings_dialog(self):
+    def _on_top_play_intro_video(self):
+        anim_cfg = self.theme.get("animations", {})
+        vid = anim_cfg.get("intro_video_path", "")
+        if not vid or not os.path.isfile(vid):
+            QMessageBox.information(
+                self,
+                "Configure Intro Video",
+                "Please select an Intro Video file in Settings -> Tab 3 (Animation & Intro/Outro)."
+            )
+            self._open_settings_dialog(initial_tab=2)
+            return
+        self._break_active = True
+        self.btn_commercial_break.setText("RESUME GAMEPLAY (RETURN TO BOARD)")
+        self.btn_commercial_break.setStyleSheet("""
+            QPushButton {
+                background-color: #238636; border: 1px solid #2ea043; color: #ffffff;
+                font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #2ea043; }
+        """)
+        event_bus.trigger_standby_intro_video.emit({
+            "video_path": vid,
+            "merge_seconds": float(anim_cfg.get("intro_merge_seconds", 5.0)),
+            "fade_duration_ms": int(anim_cfg.get("intro_fade_duration_ms", 1500)),
+        })
+
+    def _on_top_play_outro_music(self):
+        anim_cfg = self.theme.get("animations", {})
+        outro = anim_cfg.get("outro_music_path") or self.theme.get("sounds", {}).get("outro_music", "")
+        if not outro or not os.path.isfile(outro):
+            QMessageBox.information(
+                self,
+                "Configure Outro Music",
+                "Please select an Outro Music audio file in Settings -> Tab 3 (Animation) or Tab 4 (Sound Manager)."
+            )
+            self._open_settings_dialog(initial_tab=2)
+            return
+        self._break_active = True
+        self.btn_commercial_break.setText("RESUME GAMEPLAY (RETURN TO BOARD)")
+        self.btn_commercial_break.setStyleSheet("""
+            QPushButton {
+                background-color: #238636; border: 1px solid #2ea043; color: #ffffff;
+                font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #2ea043; }
+        """)
+        event_bus.trigger_standby_outro_music.emit(outro)
+
+    def _open_settings_dialog(self, initial_tab: int = 0):
         dlg = SettingsDialog(self.theme, self.audio_manager, self)
+        if 0 <= initial_tab < dlg.tab_widget.count():
+            dlg.tab_widget.setCurrentIndex(initial_tab)
         if dlg.exec():
             self.theme = dlg.theme
 
@@ -673,22 +744,21 @@ class HostControllerWindow(QMainWindow):
         return scroll
 
     def _on_lock_roster(self):
-        # 1. Randomize and lock questions for this match in SQLite DB
         DBManager().activate_game_categories()
 
-        # 2. Deactivate standby screen and ensure TV displays the live category board
         self._break_active = False
         if hasattr(self, "btn_commercial_break"):
-            self.btn_commercial_break.setText("COMMERCIAL BREAK (WAITING SCREEN)")
+            self.btn_commercial_break.setText("CHẾ ĐỘ CHỜ / QUẢNG CÁO (STANDBY)")
             self.btn_commercial_break.setStyleSheet("""
                 QPushButton {
                     background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                    font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
                 }
                 QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
             """)
+        event_bus.stop_standby_media.emit()
         event_bus.trigger_standby_mode.emit("off")
-        
+
         player_names = []
         for p_id in ("p1", "p2", "p3"):
             info = self.p_inputs[p_id]
@@ -701,11 +771,12 @@ class HostControllerWindow(QMainWindow):
         self.s_engine = ScoreEngine(player_names)
         self._update_dock_player_labels()
         self._update_live_score_display()
+        self._refresh_dd_player_combo()
 
-        # Data Snapshot Locking
         self.q_engine.lock_session_data()
         self._load_board_for_round(1)
         self._load_final_jeopardy_data()
+        self._reset_final_jeopardy_sequence(keep_clue=True)
 
         event_bus.players_updated.emit(self.contestants)
         event_bus.score_updated.emit(self.s_engine.get_all_scores())
@@ -715,7 +786,7 @@ class HostControllerWindow(QMainWindow):
         self.tabs.setCurrentIndex(1)
 
     # =========================================================================
-    # TAB 2: ROUND 1 & 2 COORDINATION
+    # TAB 2: ROUND 1 & 2 COORDINATION + INLINE DAILY DOUBLE WAGER (REQ #8)
     # =========================================================================
 
     def _build_tab2_board(self):
@@ -749,7 +820,7 @@ class HostControllerWindow(QMainWindow):
         self.btn_intro_sequence.setToolTip("Sequentially open and reveal categories (3 steps per column)")
         self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
         self.btn_intro_sequence.clicked.connect(self._on_intro_sequence_clicked)
-        
+
         self.btn_cancel_intro = QPushButton("RETURN TO BOARD")
         self.btn_cancel_intro.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
         self.btn_cancel_intro.clicked.connect(self._on_cat_cancel)
@@ -767,7 +838,6 @@ class HostControllerWindow(QMainWindow):
 
         layout.addWidget(cat_group)
 
-        # 6x5 Board Matrix & Clue Peek / Broadcast Playout
         splitter = QSplitter(Qt.Horizontal)
 
         # Left: 6x5 Matrix Board
@@ -811,7 +881,7 @@ class HostControllerWindow(QMainWindow):
         l_layout.addLayout(self.grid_layout)
         splitter.addWidget(left_frame)
 
-        # Right: Peek Box + 5-Second Countdown + 2-Step Broadcast Controls
+        # Right: Peek Box + 5-Second Countdown + Inline DD Wager + 2-Step Broadcast Controls
         right_frame = QFrame()
         right_frame.setStyleSheet("background-color: #161b22; border: 1px solid #30363d; border-radius: 6px;")
         r_layout = QVBoxLayout(right_frame)
@@ -825,8 +895,8 @@ class HostControllerWindow(QMainWindow):
         self.peek_text = QTextEdit()
         self.peek_text.setReadOnly(True)
         self.peek_text.setStyleSheet("background-color: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px; color: #f0f6fc;")
-        self.peek_text.setMaximumHeight(150)
-        self.peek_text.setMinimumHeight(100)
+        self.peek_text.setMaximumHeight(140)
+        self.peek_text.setMinimumHeight(95)
         self._set_peek_placeholder()
         r_layout.addWidget(self.peek_text)
 
@@ -866,10 +936,10 @@ class HostControllerWindow(QMainWindow):
         tb_layout.addWidget(self.host_timer_bar)
         r_layout.addWidget(timer_box)
 
-        # 2-Step Broadcast Controls
-        cmd_box = QGroupBox("BROADCAST PLAYOUT (2 STEPS)")
+        # 2-Step Broadcast Controls + Inline Daily Double Wager Panel (Requirement #8)
+        cmd_box = QGroupBox("BROADCAST PLAYOUT & DAILY DOUBLE WAGER")
         cb_layout = QVBoxLayout(cmd_box)
-        cb_layout.setSpacing(7)
+        cb_layout.setSpacing(8)
 
         self.btn_display_clue = QPushButton("1. ZOOM POINT CELL / TV SPLASH")
         self.btn_display_clue.setStyleSheet("""
@@ -881,6 +951,57 @@ class HostControllerWindow(QMainWindow):
         """)
         self.btn_display_clue.clicked.connect(self._on_display_clue_clicked)
 
+        # Inline Daily Double Wager Panel (Requirement #8)
+        self.dd_wager_frame = QFrame()
+        self.dd_wager_frame.setStyleSheet("""
+            QFrame {
+                background-color: #281219;
+                border: 2px solid #e11d48;
+                border-radius: 6px;
+                padding: 6px;
+            }
+        """)
+        dd_lay = QVBoxLayout(self.dd_wager_frame)
+        dd_lay.setContentsMargins(8, 8, 8, 8)
+        dd_lay.setSpacing(6)
+
+        lbl_dd_header = QLabel("★ DAILY DOUBLE WAGER ENTRY (NHẬP TIỀN CƯỢC TRƯỚC KHI LẬT CÂU HỎI)")
+        lbl_dd_header.setStyleSheet("color: #fda4af; font-weight: 900; font-size: 12px; border: none;")
+        dd_lay.addWidget(lbl_dd_header)
+
+        dd_form = QHBoxLayout()
+        self.dd_player_combo = QComboBox()
+        self._refresh_dd_player_combo()
+        self.dd_player_combo.currentIndexChanged.connect(self._on_dd_player_changed)
+
+        self.dd_wager_spin = QSpinBox()
+        self.dd_wager_spin.setRange(5, 1000)
+        self.dd_wager_spin.setSingleStep(100)
+        self.dd_wager_spin.setValue(200)
+        self.dd_wager_spin.setPrefix("$ ")
+
+        dd_form.addWidget(QLabel("Player:"))
+        dd_form.addWidget(self.dd_player_combo, 1)
+        dd_form.addWidget(QLabel("Wager:"))
+        dd_form.addWidget(self.dd_wager_spin, 1)
+        dd_lay.addLayout(dd_form)
+
+        self.lbl_dd_range_hint = QLabel("Allowed Wager: $5 - $1,000")
+        self.lbl_dd_range_hint.setStyleSheet("color: #fbbf24; font-size: 11px; font-weight: bold; border: none;")
+        dd_lay.addWidget(self.lbl_dd_range_hint)
+
+        self.btn_reveal_dd = QPushButton("[LOCK DD WAGER & 3D FLIP TO CLUE]")
+        self.btn_reveal_dd.setStyleSheet("""
+            QPushButton {
+                background-color: #e11d48; color: white; font-weight: bold;
+                font-size: 13px; padding: 8px; border: 1px solid #f43f5e;
+            }
+            QPushButton:hover { background-color: #f43f5e; }
+        """)
+        self.btn_reveal_dd.clicked.connect(self._on_reveal_dd_clicked)
+        dd_lay.addWidget(self.btn_reveal_dd)
+        self.dd_wager_frame.setVisible(False)
+
         self.btn_clue_reveal = QPushButton("2. REVEAL CLUE TEXT")
         self.btn_clue_reveal.setStyleSheet("""
             QPushButton {
@@ -890,17 +1011,6 @@ class HostControllerWindow(QMainWindow):
             QPushButton:hover { background-color: #a371f7; }
         """)
         self.btn_clue_reveal.clicked.connect(self._on_clue_reveal_clicked)
-
-        self.btn_reveal_dd = QPushButton("[DAILY DOUBLE: ENTER WAGER & REVEAL]")
-        self.btn_reveal_dd.setStyleSheet("""
-            QPushButton {
-                background-color: #e11d48; color: white; font-weight: bold;
-                font-size: 13px; padding: 8px; border: 1px solid #f43f5e;
-            }
-            QPushButton:hover { background-color: #f43f5e; }
-        """)
-        self.btn_reveal_dd.setVisible(False)
-        self.btn_reveal_dd.clicked.connect(self._on_reveal_dd_clicked)
 
         self.btn_toggle_answer = QPushButton("TOGGLE TV ANSWER")
         self.btn_toggle_answer.setStyleSheet("""
@@ -926,8 +1036,8 @@ class HostControllerWindow(QMainWindow):
         self.clue_status.setStyleSheet("color: #8b949e; font-style: italic;")
 
         cb_layout.addWidget(self.btn_display_clue)
+        cb_layout.addWidget(self.dd_wager_frame)
         cb_layout.addWidget(self.btn_clue_reveal)
-        cb_layout.addWidget(self.btn_reveal_dd)
         cb_layout.addWidget(self.btn_toggle_answer)
         cb_layout.addWidget(self.btn_close_clue)
         cb_layout.addWidget(self.clue_status)
@@ -939,11 +1049,10 @@ class HostControllerWindow(QMainWindow):
         right_scroll.setWidget(right_frame)
 
         splitter.addWidget(right_scroll)
-        splitter.setStretchFactor(0, 65)
-        splitter.setStretchFactor(1, 35)
+        splitter.setStretchFactor(0, 64)
+        splitter.setStretchFactor(1, 36)
         layout.addWidget(splitter)
 
-        # Bottom round completion controls
         finish_row = QHBoxLayout()
         finish_row.addStretch()
         self.btn_finish_round = QPushButton("COMPLETE ROUND 1 & UNLOCK ROUND 2")
@@ -966,28 +1075,50 @@ class HostControllerWindow(QMainWindow):
 
         return widget
 
+    def _refresh_dd_player_combo(self):
+        if not hasattr(self, "dd_player_combo"):
+            return
+        curr_pid = self.dd_player_combo.currentData() or "p1"
+        self.dd_player_combo.blockSignals(True)
+        self.dd_player_combo.clear()
+        for pid in ("p1", "p2", "p3"):
+            self.dd_player_combo.addItem(f"{self.contestants[pid]['name']} (${self.contestants[pid]['score']})", pid)
+        idx = {"p1": 0, "p2": 1, "p3": 2}.get(curr_pid, 0)
+        self.dd_player_combo.setCurrentIndex(idx)
+        self.dd_player_combo.blockSignals(False)
+        self._on_dd_player_changed()
+
+    def _on_dd_player_changed(self):
+        if not hasattr(self, "dd_player_combo") or not hasattr(self, "dd_wager_spin"):
+            return
+        pid = self.dd_player_combo.currentData() or "p1"
+        score = self.contestants.get(pid, {}).get("score", 0)
+        ceiling = 1000 if self.current_round == 1 else 2000
+        max_wager = max(score, ceiling)
+        self.dd_wager_spin.setRange(5, max_wager)
+        default_val = self.selected_points if 5 <= self.selected_points <= max_wager else min(max_wager, ceiling)
+        self.dd_wager_spin.setValue(max(5, default_val))
+        if hasattr(self, "lbl_dd_range_hint"):
+            self.lbl_dd_range_hint.setText(
+                f"Contestant Score: ${score:,} | Allowed DD Wager: $5 – ${max_wager:,}"
+            )
+
     def _on_intro_sequence_clicked(self):
-        """Single button logic for category intro sequence:
-        1. Show Category covered by Logo
-        2. Fade out Logo to reveal Category title
-        3. Slide to next Category (also covered by Logo)
-        ...
-        4. Complete & Return to Board
-        """
         if not hasattr(self, "intro_seq_state"):
             self.intro_seq_state = "SHOW"
             self.intro_col_index = 0
-            
+
         curr = self.intro_col_index
-        
+
         if self.intro_seq_state == "SHOW":
             event_bus.trigger_category_step.emit(1, curr)
             self.btn_intro_sequence.setText(f"REVEAL CATEGORY {curr+1}")
             self.btn_intro_sequence.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
             self.intro_seq_state = "REVEAL"
-            
+
         elif self.intro_seq_state == "REVEAL":
             event_bus.trigger_category_step.emit(2, curr)
+            event_bus.play_sound_event.emit("round_category_intro")
             if curr < 5:
                 self.btn_intro_sequence.setText(f"SLIDE TO CATEGORY {curr+2} (LOGO)")
                 self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
@@ -996,7 +1127,7 @@ class HostControllerWindow(QMainWindow):
                 self.btn_intro_sequence.setText("COMPLETE & RETURN TO BOARD")
                 self.btn_intro_sequence.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
                 self.intro_seq_state = "RETURN"
-                
+
         elif self.intro_seq_state == "SLIDE":
             self.intro_col_index += 1
             nxt = self.intro_col_index
@@ -1004,7 +1135,7 @@ class HostControllerWindow(QMainWindow):
             self.btn_intro_sequence.setText(f"REVEAL CATEGORY {nxt+1}")
             self.btn_intro_sequence.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
             self.intro_seq_state = "REVEAL"
-            
+
         elif self.intro_seq_state == "RETURN":
             self._on_cat_cancel()
 
@@ -1016,27 +1147,21 @@ class HostControllerWindow(QMainWindow):
             self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
         event_bus.trigger_category_step.emit(4, 0)
         event_bus.cancel_category_reveal.emit()
+
     def _on_cat_open_col(self):
-        """Backward compatibility alias for opening category column 0."""
-        self._on_open_categories_clicked()
+        self._on_intro_sequence_clicked()
 
     def _on_cat_fade_logo(self):
-        """Backward compatibility alias for fading category logo."""
         curr = getattr(self, "intro_col_index", 0)
-        if hasattr(self, "cat_revealed_flags") and curr < len(self.cat_revealed_flags):
-            self.cat_revealed_flags[curr] = True
         event_bus.trigger_category_step.emit(2, curr)
         event_bus.trigger_category_fade_logo.emit()
         event_bus.trigger_category_reveal_step.emit(1)
 
     def _on_cat_slide_next(self):
-        """Backward compatibility alias for sliding to next category."""
         curr = getattr(self, "intro_col_index", 0)
         if curr < 5:
             self.intro_col_index = curr + 1
             nxt = self.intro_col_index
-            if hasattr(self, "cat_revealed_flags") and nxt < len(self.cat_revealed_flags):
-                self.cat_revealed_flags[nxt] = True
             event_bus.trigger_category_step.emit(3, nxt)
             event_bus.trigger_category_slide_next.emit()
             event_bus.trigger_category_reveal_step.emit(2)
@@ -1106,17 +1231,17 @@ class HostControllerWindow(QMainWindow):
         self.current_round = round_id
         self._update_round_button_styles()
 
-        # Turn off commercial break / standby screen when entering round
         self._break_active = False
         if hasattr(self, "btn_commercial_break"):
-            self.btn_commercial_break.setText("COMMERCIAL BREAK (WAITING SCREEN)")
+            self.btn_commercial_break.setText("CHẾ ĐỘ CHỜ / QUẢNG CÁO (STANDBY)")
             self.btn_commercial_break.setStyleSheet("""
                 QPushButton {
                     background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
-                    font-weight: bold; padding: 5px 14px; border-radius: 5px; font-size: 12px;
+                    font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
                 }
                 QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
             """)
+        event_bus.stop_standby_media.emit()
         event_bus.trigger_standby_mode.emit("off")
 
         if round_id in (1, 2):
@@ -1144,7 +1269,7 @@ class HostControllerWindow(QMainWindow):
 
     def _set_peek_placeholder(self):
         self.peek_text.setHtml(
-            "<div style='color: #8b949e; font-style: italic; text-align: center; margin-top: 40px;'>"
+            "<div style='color: #8b949e; font-style: italic; text-align: center; margin-top: 32px;'>"
             "<i>Click any board point cell to peek question, answer, and visual asset status...</i>"
             "</div>"
         )
@@ -1152,6 +1277,7 @@ class HostControllerWindow(QMainWindow):
     def _load_board_for_round(self, round_id):
         self.board_cache.clear()
         self.selected_clue = None
+        self.dd_wager_frame.setVisible(False)
         self._set_peek_placeholder()
 
         base_multiplier = 200 if round_id == 1 else 400
@@ -1233,7 +1359,15 @@ class HostControllerWindow(QMainWindow):
 
         self.selected_clue = curr_clue
         self.selected_points = curr_clue["points"]
+        self._dd_wager_locked = False
         self._update_dock_quick_point_buttons(self.selected_points)
+
+        # Show inline DD wager panel immediately if this cell is a Daily Double
+        if bool(curr_clue.get("is_daily_double")):
+            self._refresh_dd_player_combo()
+            self.dd_wager_frame.setVisible(True)
+        else:
+            self.dd_wager_frame.setVisible(False)
 
         asset_fn = curr_clue.get("asset_filename", "")
         asset_p = Path("ui/assets/image") / asset_fn if asset_fn else None
@@ -1274,7 +1408,7 @@ class HostControllerWindow(QMainWindow):
         payload["has_asset"] = bool(asset_fn and asset_path and asset_path.exists())
         payload["asset_path"] = str(asset_path.resolve()) if payload["has_asset"] else ""
 
-        event_bus.trigger_clue_zoom.emit(payload)
+        # Emit single zoom request signal (preventing double-animation trigger)
         event_bus.request_clue_zoom.emit(payload)
 
         self.tv_answer_visible = False
@@ -1282,26 +1416,58 @@ class HostControllerWindow(QMainWindow):
         self.btn_toggle_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; font-size: 13px; padding: 8px; border: 1px solid #30363d;")
 
         if payload.get("is_daily_double"):
-            self.clue_status.setText("DAILY DOUBLE! Zooming point tile. Click '2. Reveal Clue Text' to show question.")
-            self.clue_status.setStyleSheet("color: #f59e0b; font-weight: bold;")
-            self.btn_reveal_dd.setVisible(True)
+            self._dd_wager_locked = False
+            self._refresh_dd_player_combo()
+            self.dd_wager_frame.setVisible(True)
+            self.btn_clue_reveal.setEnabled(False)
+            self.clue_status.setText("DAILY DOUBLE on TV! Enter contestant wager in the red box above to unlock & flip clue.")
+            self.clue_status.setStyleSheet("color: #f43f5e; font-weight: bold;")
         else:
-            self.btn_reveal_dd.setVisible(False)
-            self.clue_status.setText(f"Zooming point tile on TV [{payload['category_name']} ${payload['points']}]. Click '2. Reveal Clue Text' to show clue card.")
+            self.dd_wager_frame.setVisible(False)
+            self.btn_clue_reveal.setEnabled(True)
+            self.clue_status.setText(f"Point tile on TV [{payload['category_name']} ${payload['points']}]. Click '2. Reveal Clue Text' to show clue card.")
             self.clue_status.setStyleSheet("color: #3fb950; font-weight: bold;")
+
+    def _on_reveal_dd_clicked(self):
+        """Requirement #8: Locks Daily Double wager from inline panel (updates dock scoring buttons)
+        and triggers the 3D Flip -> Black Backing -> Clue Question transition on TV.
+        """
+        if not self.selected_clue:
+            return
+
+        p_id = self.dd_player_combo.currentData() or "p1"
+        p_name = self.contestants[p_id]["name"]
+        wager = self.dd_wager_spin.value()
+        round_id = self.current_round
+
+        is_valid, err_msg = self.s_engine.validate_dd_wager(p_id, wager, round_id)
+        if not is_valid:
+            QMessageBox.warning(self, "Invalid Daily Double Wager", err_msg)
+            return
+
+        self._pending_dd_wager = {"player_id": p_id, "wager": wager}
+        self._dd_wager_locked = True
+        self.selected_points = wager
+        self._update_dock_quick_point_buttons(wager)
+        self.btn_clue_reveal.setEnabled(True)
+        self.clue_status.setText(f"DD Wager Locked: {p_name} wagered ${wager:,}. Flipping to Clue on TV...")
+        self.clue_status.setStyleSheet("color: #f59e0b; font-weight: bold;")
+
+        # Trigger 3D flip reveal on TV (DO NOT emit display_question simultaneously!)
+        event_bus.trigger_clue_reveal.emit()
 
     def _on_clue_reveal_clicked(self):
         if not self.selected_clue:
             return
-        payload = dict(self.selected_clue)
-        asset_fn = payload.get("asset_filename", "")
-        asset_path = Path("ui/assets/image") / asset_fn if asset_fn else None
-        payload["has_asset"] = bool(asset_fn and asset_path and asset_path.exists())
-        payload["asset_path"] = str(asset_path.resolve()) if payload["has_asset"] else ""
 
+        # If Daily Double and wager hasn't been locked yet, lock the inline spinbox value automatically
+        if self.selected_clue.get("is_daily_double") and not self._dd_wager_locked:
+            self._on_reveal_dd_clicked()
+            return
+
+        # Emit ONLY trigger_clue_reveal (never emit display_question alongside it, which caused the flip background bug!)
         event_bus.trigger_clue_reveal.emit()
-        event_bus.display_question.emit(payload)
-        self.btn_reveal_dd.setVisible(False)
+        self.dd_wager_frame.setVisible(False)
         self.clue_status.setText("Clue card active on TV!")
         self.clue_status.setStyleSheet("color: #3fb950; font-weight: bold;")
 
@@ -1310,39 +1476,6 @@ class HostControllerWindow(QMainWindow):
         self.buzzer_active_player = None
         self._update_buzzer_lockout_ui()
         event_bus.set_buzzer_lockout.emit(True)
-
-    def _on_reveal_dd_clicked(self):
-        if not self.selected_clue:
-            return
-
-        p_id = self.buzzer_active_player or "p1"
-        p_name = self.contestants[p_id]["name"]
-        score = self.contestants[p_id]["score"]
-        round_id = self.current_round
-        ceiling = 1000 if round_id == 1 else 2000
-        max_wager = max(score, ceiling)
-
-        wager, ok = QInputDialog.getInt(
-            self,
-            f"DAILY DOUBLE — {p_name}",
-            f"Enter wager (min=$5, max=${max_wager}):\n"
-            f"Current Score: ${score} | Round {round_id} Ceiling: ${ceiling}",
-            value=min(score, ceiling),
-            min=5,
-            max=max_wager,
-            step=100
-        )
-        if not ok:
-            return
-
-        is_valid, err_msg = self.s_engine.validate_dd_wager(p_id, wager, round_id)
-        if not is_valid:
-            QMessageBox.warning(self, "Invalid Wager", err_msg)
-            return
-
-        self._pending_dd_wager = {"player_id": p_id, "wager": wager}
-        self.clue_status.setText(f"DD: {p_name} wagered ${wager}. Revealing question...")
-        self._on_clue_reveal_clicked()
 
     def _on_toggle_tv_answer_clicked(self):
         if not self.selected_clue:
@@ -1366,7 +1499,10 @@ class HostControllerWindow(QMainWindow):
         row = self.selected_clue["row_index"]
 
         if clue_id:
-            self.q_engine.mark_as_used(clue_id)
+            try:
+                self.q_engine.mark_as_used(self.current_round, col, row)
+            except TypeError:
+                self.q_engine.db.mark_clue_used(clue_id)
 
         self.selected_clue["is_used"] = 1
         if (col, row) in self.board_cache:
@@ -1375,7 +1511,26 @@ class HostControllerWindow(QMainWindow):
         btn = self.clue_buttons[(col, row)]
         self._apply_clue_button_style(btn, is_used=True, is_selected=False, is_dd=bool(self.selected_clue.get("is_daily_double")))
 
+        # Check if all 5 clues in this column are now used -> visually mark column header on Host
+        all_col_used = all(
+            bool(self.board_cache.get((col, r), {}).get("is_used", 0))
+            for r in range(5)
+        )
+        if all_col_used and 0 <= col < len(self.cat_headers):
+            self.cat_headers[col].setStyleSheet("""
+                background-color: #090d16;
+                color: #484f58;
+                font-weight: 800;
+                font-size: 13px;
+                border: 2px solid #21262d;
+                border-radius: 0px;
+                padding: 6px 2px;
+                min-height: 44px;
+            """)
+
         self.tv_answer_visible = False
+        self.dd_wager_frame.setVisible(False)
+        self.btn_clue_reveal.setEnabled(True)
         self.btn_toggle_answer.setText("TOGGLE TV ANSWER")
         self.btn_toggle_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; font-size: 13px; padding: 8px; border: 1px solid #30363d;")
         event_bus.toggle_tv_answer.emit(False, "")
@@ -1387,11 +1542,11 @@ class HostControllerWindow(QMainWindow):
         self._reset_buzzers()
 
     # =========================================================================
-    # TAB 3: FINAL JEOPARDY
+    # TAB 3: FINAL JEOPARDY WITH REPLAY & DB/MANUAL OVERRIDE (REQ #10)
     # =========================================================================
 
     def _build_tab3_final(self):
-        """Final Jeopardy Sequencer following official broadcast rules & reference images 11-14."""
+        """Final Jeopardy Sequencer with Multi-Play Reset, DB Clue Selector & Manual Override."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -1401,12 +1556,30 @@ class HostControllerWindow(QMainWindow):
         header = QLabel("ROUND 3: FINAL JEOPARDY! SEQUENCER")
         header.setStyleSheet("font-size: 16px; font-weight: bold; color: #58a6ff;")
 
-        self.chk_manual_override = QCheckBox(" Enable Manual Override")
+        # Requirement #10: Replay / Reset Final Jeopardy & DB Clue Selector
+        self.combo_final_db_clues = QComboBox()
+        self.combo_final_db_clues.setMinimumWidth(260)
+        self.combo_final_db_clues.setToolTip("Select any Round 3 / Final Jeopardy clue from SQLite database")
+        self.combo_final_db_clues.currentIndexChanged.connect(self._on_final_db_clue_selected)
+
+        self.btn_next_final_clue = QPushButton("🎲 Đổi Câu Khác Từ DB (Next DB Clue)")
+        self.btn_next_final_clue.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 6px 12px;")
+        self.btn_next_final_clue.clicked.connect(self._on_cycle_next_final_db_clue)
+
+        self.btn_reset_final_round = QPushButton("↻ Chơi Lại Vòng Cuối (Reset / Replay Final)")
+        self.btn_reset_final_round.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 6px 14px;")
+        self.btn_reset_final_round.clicked.connect(lambda: self._reset_final_jeopardy_sequence(keep_clue=True))
+
+        self.chk_manual_override = QCheckBox(" Enable Manual Override (Nhập thủ công / Mở khoá cược)")
         self.chk_manual_override.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 13px;")
         self.chk_manual_override.toggled.connect(self._on_manual_override_toggled)
 
         top_row.addWidget(header)
         top_row.addStretch()
+        top_row.addWidget(QLabel("DB Clue:"))
+        top_row.addWidget(self.combo_final_db_clues)
+        top_row.addWidget(self.btn_next_final_clue)
+        top_row.addWidget(self.btn_reset_final_round)
         top_row.addWidget(self.chk_manual_override)
         layout.addLayout(top_row)
 
@@ -1419,15 +1592,21 @@ class HostControllerWindow(QMainWindow):
         self.edit_clue.setPlaceholderText("Enter Final Clue text...")
         self.edit_ans = QLineEdit()
         self.edit_ans.setPlaceholderText("Enter correct answer...")
+
+        btn_apply_manual = QPushButton("Apply Manual Clue & Reset Final Sequence")
+        btn_apply_manual.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px 14px;")
+        btn_apply_manual.clicked.connect(self._on_apply_manual_final_clicked)
+
         mf_layout.addRow("Manual Category:", self.edit_cat)
         mf_layout.addRow("Manual Clue:", self.edit_clue)
         mf_layout.addRow("Manual Answer:", self.edit_ans)
+        mf_layout.addRow("", btn_apply_manual)
         self.manual_frame.setVisible(False)
         layout.addWidget(self.manual_frame)
 
-        # STEP 1: Final Logo Splash (Image 11)
+        # STEP 1: Final Logo Splash
         self.step1_box = QGroupBox("STEP 1: DISPLAY FINAL JEOPARDY LOGO SPLASH")
-        self.step1_box.setMinimumHeight(90)
+        self.step1_box.setMinimumHeight(85)
         s1_layout = QVBoxLayout(self.step1_box)
         self.btn_show_splash = QPushButton("[1. Show Final Splash Logo]")
         self.btn_show_splash.setStyleSheet("background-color: #8957e5; color: white; font-weight: bold; padding: 8px;")
@@ -1435,10 +1614,9 @@ class HostControllerWindow(QMainWindow):
         s1_layout.addWidget(self.btn_show_splash)
         layout.addWidget(self.step1_box)
 
-        # STEP 2: Category & Wager Entry (Image 12)
-        # Allows host to switch between Category and Logo Splash while wagers are entered and locked
+        # STEP 2: Category & Wager Entry
         self.step2_box = QGroupBox("STEP 2: ANNOUNCE CATEGORY & ENTER WAGERS")
-        self.step2_box.setMinimumHeight(240)
+        self.step2_box.setMinimumHeight(230)
         s2_layout = QVBoxLayout(self.step2_box)
 
         cat_ctrl_row = QHBoxLayout()
@@ -1464,7 +1642,7 @@ class HostControllerWindow(QMainWindow):
         self.wager_name_labels = {}
         for p_id in ("p1", "p2", "p3"):
             box = QFrame()
-            box.setMinimumHeight(140)
+            box.setMinimumHeight(135)
             box.setObjectName(f"wager_card_{p_id}")
             box.setStyleSheet(f"""
                 QFrame#wager_card_{p_id} {{
@@ -1527,7 +1705,7 @@ class HostControllerWindow(QMainWindow):
         s2_layout.addWidget(self.btn_lock_wagers)
         layout.addWidget(self.step2_box)
 
-        # STEP 3: Reveal Clue & 30-Second Think Music (Images 13 & 14)
+        # STEP 3: Reveal Clue & 30-Second Think Music
         self.step3_box = QGroupBox("STEP 3: REVEAL FINAL CLUE & 30-SECOND THINK MUSIC")
         self.step3_box.setMinimumHeight(180)
         self.step3_box.setEnabled(False)
@@ -1544,7 +1722,6 @@ class HostControllerWindow(QMainWindow):
         self.btn_start_30s.clicked.connect(self._on_start_30s)
 
         self.btn_restart_final = QPushButton("RESTART 30S TIMER")
-        self.btn_restart_final.setToolTip("Rewind Think Music to 0:00, reset timer to 30s, and re-arm 15s red cross-fade")
         self.btn_restart_final.setStyleSheet("""
             QPushButton {
                 background-color: #0284c7; color: white; font-weight: bold; padding: 8px 16px; border-radius: 4px;
@@ -1583,7 +1760,7 @@ class HostControllerWindow(QMainWindow):
         s3_layout.addLayout(t_layout)
         layout.addWidget(self.step3_box)
 
-        # STEP 4: Podium Reveal Sequence (Host Controller Only - Never Mirrored to TV)
+        # STEP 4: Podium Reveal Sequence
         self.step4_box = QGroupBox("STEP 4: SONY PODIUM REVEAL SEQUENCE (3RD -> 2ND -> 1ST)")
         self.step4_box.setMinimumHeight(310)
         self.step4_box.setEnabled(False)
@@ -1613,57 +1790,189 @@ class HostControllerWindow(QMainWindow):
         return scroll
 
     def _refresh_final_wagers_ui(self):
-        """Update Final Jeopardy wagering UI according to official rules:
-        - Only contestants with positive scores (> $0) can wager and participate.
-        - Wager range: $0 up to full cumulative score.
-        - Disqualified contestants (score <= 0) -> disabled spinbox + disqualified status.
+        """Updates Final Jeopardy wagering UI.
+        When Manual Override is active, unlocks wagering for all contestants (even if score <= 0)
+        so Final Jeopardy can always be tested or re-played without being blocked!
         """
-        eligible = self.s_engine.get_final_eligible_players() if hasattr(self, 's_engine') else ["p1", "p2", "p3"]
+        override_on = hasattr(self, "chk_manual_override") and self.chk_manual_override.isChecked()
+        eligible = self.s_engine.get_final_eligible_players() if hasattr(self, "s_engine") else ["p1", "p2", "p3"]
+
         for p_id in ("p1", "p2", "p3"):
             c_name = self.contestants[p_id]["name"]
             score = self.contestants[p_id]["score"]
-            is_eligible = p_id in eligible
+            is_eligible = (p_id in eligible) or override_on
 
             if p_id in self.wager_name_labels:
                 self.wager_name_labels[p_id].setText(c_name)
             if p_id in self.wager_notes:
                 if is_eligible:
-                    self.wager_notes[p_id].setText(f"Score: ${score} | Wager: $0 - ${score}")
-                    self.wager_notes[p_id].setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: bold;")
+                    max_w = max(score, 10000 if override_on else 0)
+                    tag = " [OVERRIDE UNLOCKED]" if (override_on and score <= 0) else ""
+                    self.wager_notes[p_id].setText(f"Score: ${score:,} | Wager: $0 - ${max_w:,}{tag}")
+                    self.wager_notes[p_id].setStyleSheet("color: #3fb950; font-size: 12px; font-weight: bold;" if override_on else "color: #c9d1d9; font-size: 12px; font-weight: bold;")
                 else:
-                    self.wager_notes[p_id].setText(f"Score: ${score} — ELIMINATED FROM ROUND 3")
+                    self.wager_notes[p_id].setText(
+                        f"Score: ${score} — ELIMINATED (Tick 'Enable Manual Override' to unlock)"
+                    )
                     self.wager_notes[p_id].setStyleSheet("color: #da3633; font-size: 12px; font-weight: bold;")
             if p_id in self.wager_spins:
-                max_w = max(score, 0)
+                max_w = max(score, 10000 if override_on else 0)
                 self.wager_spins[p_id].setRange(0, max_w)
-                self.wager_spins[p_id].setValue(0)
                 self.wager_spins[p_id].setEnabled(is_eligible)
+
+    def _reset_final_jeopardy_sequence(self, keep_clue: bool = True):
+        """Requirement #10: Resets and unlocks all steps of Final Jeopardy so it can be re-played
+        as many times as desired (with a new DB clue or manual override clue).
+        """
+        self.final_timer.stop()
+        self.audio_manager.stop_all()
+        self.final_timer_seconds = 30
+        self.is_final_answer_visible = False
+
+        if hasattr(self, "timer_bar"):
+            self.timer_bar.setValue(30)
+            self.timer_bar.setFormat("30 seconds")
+
+        if hasattr(self, "btn_lock_wagers"):
+            self.btn_lock_wagers.setEnabled(True)
+        if hasattr(self, "step2_box"):
+            self.step2_box.setEnabled(True)
+        if hasattr(self, "step3_box"):
+            self.step3_box.setEnabled(False)
+        if hasattr(self, "btn_start_30s"):
+            self.btn_start_30s.setEnabled(True)
+        if hasattr(self, "btn_restart_final"):
+            self.btn_restart_final.setEnabled(False)
+        if hasattr(self, "btn_stop_30s"):
+            self.btn_stop_30s.setEnabled(False)
+        if hasattr(self, "btn_toggle_final_answer"):
+            self.btn_toggle_final_answer.setText("TOGGLE TV ANSWER")
+            self.btn_toggle_final_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; padding: 8px 16px; border: 1px solid #30363d;")
+
+        if hasattr(self, "step4_box"):
+            self.step4_box.setEnabled(False)
+        if hasattr(self, "btn_calc_final"):
+            self.btn_calc_final.setEnabled(False)
+            self.btn_calc_final.setStyleSheet("""
+                QPushButton {
+                    background-color: #21262d; color: #8b949e; font-weight: bold; font-size: 14px;
+                    padding: 10px; border-radius: 6px; border: 1px solid #30363d;
+                }
+            """)
+
+        if hasattr(self, "reveal_cards_layout"):
+            while self.reveal_cards_layout.count():
+                child = self.reveal_cards_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+
+        if not keep_clue:
+            self._load_final_jeopardy_data()
+
+        self._refresh_final_wagers_ui()
+        event_bus.toggle_tv_answer.emit(False, "")
+        cat_name = (
+            self.edit_cat.text().strip()
+            if (hasattr(self, "chk_manual_override") and self.chk_manual_override.isChecked())
+            else (self.final_clue_data["category_name"] if self.final_clue_data else "FINAL JEOPARDY")
+        )
+        event_bus.trigger_final_step.emit(1, {"category": cat_name})
 
     def _on_manual_override_toggled(self, checked):
         self.manual_frame.setVisible(checked)
         if checked:
-            cat = self.edit_cat.text().strip() or "MANUAL FINAL CATEGORY"
-            self.final_cat_lbl.setText(f"Final Category (Manual): {cat.upper()}")
-            for spin in self.wager_spins.values():
-                spin.setEnabled(True)
+            cat = self.edit_cat.text().strip() or (self.final_clue_data["category_name"] if self.final_clue_data else "MANUAL FINAL CATEGORY")
+            clue = self.edit_clue.text().strip() or (self.final_clue_data["question_text"] if self.final_clue_data else "")
+            ans = self.edit_ans.text().strip() or (self.final_clue_data["answer_text"] if self.final_clue_data else "")
+            if not self.edit_cat.text().strip():
+                self.edit_cat.setText(cat)
+            if not self.edit_clue.text().strip():
+                self.edit_clue.setText(clue)
+            if not self.edit_ans.text().strip():
+                self.edit_ans.setText(ans)
+            self._apply_manual_preview_text()
         else:
-            self._load_final_jeopardy_data()
+            self._apply_current_db_final_clue()
+        self._reset_final_jeopardy_sequence(keep_clue=True)
+
+    def _apply_manual_preview_text(self):
+        cat = self.edit_cat.text().strip() or "MANUAL FINAL CATEGORY"
+        clue = self.edit_clue.text().strip() or "(Enter Manual Clue Text above)"
+        ans = self.edit_ans.text().strip() or "(Enter Manual Answer above)"
+        self.final_cat_lbl.setText(f"Final Category (Manual Override): {cat.upper()}")
+        html = f"<b>Clue (Manual):</b> <span style='color:#58a6ff;'>{clue}</span><br/><b>Host Answer:</b> <span style='color:#3fb950;'>{ans}</span>"
+        self.final_clue_preview.setHtml(html)
+
+    def _on_apply_manual_final_clicked(self):
+        self._apply_manual_preview_text()
+        self._reset_final_jeopardy_sequence(keep_clue=True)
+        QMessageBox.information(self, "Manual Final Clue Applied", "Manual Final Jeopardy clue applied and sequence reset!")
 
     def _load_final_jeopardy_data(self):
+        """Loads all available Round 3 & Round 4 (Tiebreaker) clues from SQLite DB so host can cycle/pick."""
         with self._get_db_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM questions WHERE round_id = 3 LIMIT 1")
-            row = cursor.fetchone()
+            cursor.execute("SELECT * FROM questions WHERE round_id IN (3, 4) ORDER BY round_id ASC, id ASC")
+            rows = [dict(r) for r in cursor.fetchall()]
 
-        if row:
-            self.final_clue_data = dict(row)
-            self.final_cat_lbl.setText(f"Final Category: {self.final_clue_data['category_name'].upper()}")
-            html = f"<b>Clue:</b> <span style='color:#58a6ff;'>{self.final_clue_data['question_text']}</span><br/><b>Host Answer:</b> <span style='color:#3fb950;'>{self.final_clue_data['answer_text']}</span>"
-            self.final_clue_preview.setHtml(html)
+        self.final_db_clues_list = rows
+        if hasattr(self, "combo_final_db_clues"):
+            self.combo_final_db_clues.blockSignals(True)
+            self.combo_final_db_clues.clear()
+            for idx, r in enumerate(rows):
+                r_tag = "R3" if r["round_id"] == 3 else "TB"
+                self.combo_final_db_clues.addItem(f"[{r_tag} #{r['id']}] {r['category_name']}", idx)
+            self.combo_final_db_clues.blockSignals(False)
+
+        if rows:
+            self.final_db_clue_index = min(self.final_db_clue_index, len(rows) - 1)
+            if hasattr(self, "combo_final_db_clues"):
+                self.combo_final_db_clues.blockSignals(True)
+                self.combo_final_db_clues.setCurrentIndex(self.final_db_clue_index)
+                self.combo_final_db_clues.blockSignals(False)
+            self._apply_current_db_final_clue()
         else:
             self.final_clue_data = None
             self.final_cat_lbl.setText("Final Category: (No Round 3 Clue Configured)")
             self.final_clue_preview.setText("Please add Round 3 clue in Tab 4 or check Manual Override.")
+
+    def _apply_current_db_final_clue(self):
+        if not self.final_db_clues_list:
+            return
+        self.final_db_clue_index = max(0, min(self.final_db_clue_index, len(self.final_db_clues_list) - 1))
+        self.final_clue_data = dict(self.final_db_clues_list[self.final_db_clue_index])
+        self.final_cat_lbl.setText(f"Final Category: {self.final_clue_data['category_name'].upper()}")
+        html = (
+            f"<b>Clue:</b> <span style='color:#58a6ff;'>{self.final_clue_data['question_text']}</span><br/>"
+            f"<b>Host Answer:</b> <span style='color:#3fb950;'>{self.final_clue_data['answer_text']}</span>"
+        )
+        self.final_clue_preview.setHtml(html)
+
+    def _on_final_db_clue_selected(self, combo_idx: int):
+        if combo_idx < 0 or combo_idx >= len(self.final_db_clues_list):
+            return
+        self.final_db_clue_index = combo_idx
+        if hasattr(self, "chk_manual_override") and self.chk_manual_override.isChecked():
+            self.chk_manual_override.setChecked(False)
+        self._apply_current_db_final_clue()
+        self._reset_final_jeopardy_sequence(keep_clue=True)
+
+    def _on_cycle_next_final_db_clue(self):
+        """Cycles to the next Final Jeopardy clue in SQLite DB and resets sequence."""
+        if not self.final_db_clues_list:
+            self._load_final_jeopardy_data()
+        if not self.final_db_clues_list:
+            QMessageBox.warning(self, "No Final Clues", "No Round 3 clues found in database. Use Manual Override or add one in Tab 4.")
+            return
+        self.final_db_clue_index = (self.final_db_clue_index + 1) % len(self.final_db_clues_list)
+        if hasattr(self, "combo_final_db_clues"):
+            self.combo_final_db_clues.blockSignals(True)
+            self.combo_final_db_clues.setCurrentIndex(self.final_db_clue_index)
+            self.combo_final_db_clues.blockSignals(False)
+        if hasattr(self, "chk_manual_override") and self.chk_manual_override.isChecked():
+            self.chk_manual_override.setChecked(False)
+        self._apply_current_db_final_clue()
+        self._reset_final_jeopardy_sequence(keep_clue=True)
 
     def _on_show_splash(self):
         cat_name = self.edit_cat.text().strip() if self.chk_manual_override.isChecked() else (self.final_clue_data['category_name'] if self.final_clue_data else "FINAL JEOPARDY")
@@ -1673,8 +1982,8 @@ class HostControllerWindow(QMainWindow):
 
     def _on_show_category_tv(self):
         cat_name = self.edit_cat.text().strip() if self.chk_manual_override.isChecked() else (self.final_clue_data['category_name'] if self.final_clue_data else "FINAL JEOPARDY")
+        # Requirement #7: trigger_final_step(2) plays "final_category_intro" on TV; wager_music removed!
         event_bus.trigger_final_step.emit(2, {"category": cat_name})
-        event_bus.play_sound_event.emit("wager_music")
 
     def _on_lock_wagers(self):
         for p_id in ("p1", "p2", "p3"):
@@ -1687,6 +1996,7 @@ class HostControllerWindow(QMainWindow):
 
         self.btn_lock_wagers.setEnabled(False)
         self.step3_box.setEnabled(True)
+        self.btn_start_30s.setEnabled(True)
 
     def _on_start_30s(self):
         self.btn_start_30s.setEnabled(False)
@@ -1711,11 +2021,11 @@ class HostControllerWindow(QMainWindow):
             clue_data = dict(self.final_clue_data) if self.final_clue_data else {"question_text": "Final Jeopardy Clue", "has_asset": False}
 
         event_bus.trigger_final_step.emit(3, clue_data)
-        event_bus.play_sound_event.emit("think_music")
+        # Requirement #7: Emit "think_30s" matching Settings key
+        event_bus.play_sound_event.emit("think_30s")
         self.final_timer.start(1000)
 
     def _on_restart_30s(self):
-        """Rewind Think Music to 0:00, reset timer to 30s, and re-arm 15s red cross-fade."""
         self.final_timer_seconds = 30
         self.timer_bar.setValue(30)
         self.timer_bar.setFormat("30 seconds")
@@ -1754,7 +2064,6 @@ class HostControllerWindow(QMainWindow):
         self.timer_bar.setValue(self.final_timer_seconds)
         self.timer_bar.setFormat(f"{self.final_timer_seconds} seconds")
 
-        # Exactly at 15 seconds remaining: trigger cross-fade from Blue to Red
         if self.final_timer_seconds == 15:
             event_bus.start_final_crossfade.emit()
 
@@ -1762,12 +2071,10 @@ class HostControllerWindow(QMainWindow):
             self.final_timer.stop()
             self.timer_bar.setFormat("TIME OUT! PENS DOWN!")
             self.btn_stop_30s.setEnabled(False)
-            # Master Spec §6.1 & Part 1 §5: Round 3 ends in complete silence (NO buzzers or timeout sound)
             self.step4_box.setEnabled(True)
             self._setup_final_reveal_order()
 
     def _setup_final_reveal_order(self):
-        """Initialize contestant podium reveal in authentic Sony show order: Rank 3 -> Rank 2 -> Rank 1."""
         while self.reveal_cards_layout.count():
             child = self.reveal_cards_layout.takeAt(0)
             if child.widget():
@@ -1855,20 +2162,18 @@ class HostControllerWindow(QMainWindow):
         is_correct = w["chk"].isChecked()
 
         if st == 0:
-            # Click 1: Reveal written response
             self.final_reveal_state[pid] = 1
             event_bus.trigger_final_contestant_reveal.emit(pid, resp_text, 0)
             w["btn_step"].setText(f"2. Reveal Wager (${wager}) & Resolve")
             w["btn_step"].setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 6px; border-radius: 4px;")
         elif st == 1:
-            # Click 2: Reveal wager and adjust score
             self.final_reveal_state[pid] = 2
             if is_correct:
                 self.s_engine.add_correct(pid, wager)
-                
+                event_bus.play_sound_event.emit("correct")
             else:
                 self.s_engine.add_incorrect(pid, wager)
-                event_bus.play_sound_event.emit("timeout")
+                event_bus.play_sound_event.emit("wrong")
 
             new_score = self.s_engine.get_score(pid)
             self.contestants[pid]["score"] = new_score
@@ -1915,7 +2220,6 @@ class HostControllerWindow(QMainWindow):
             "third": {"id": t_id, "name": self.contestants[t_id]["name"], "score": t_score, "prize": "$2,000"},
         }
         event_bus.winner_announced.emit(results)
-        
 
         QMessageBox.information(
             self,
@@ -1923,7 +2227,7 @@ class HostControllerWindow(QMainWindow):
             f"Champion: {self.contestants[w_id]['name']} (${w_score})\n"
             f"1st Runner-up: {self.contestants[s_id]['name']} (${s_score}) - $3,000\n"
             f"2nd Runner-up: {self.contestants[t_id]['name']} (${t_score}) - $2,000\n\n"
-            "(Note: Champion results are strictly displayed on Host Console to preserve authentic Jeopardy! TV presentation.)"
+            "(Tip: Click '↻ Chơi Lại Vòng Cuối' or '🎲 Đổi Câu Khác Từ DB' at the top of Tab 3 to replay Final Jeopardy!)"
         )
 
     # =========================================================================
@@ -2063,14 +2367,14 @@ class HostControllerWindow(QMainWindow):
         id_text = self.db_table.item(cur, 0).text()
         if id_text != "NEW":
             with self._get_db_conn() as conn:
-                conn.cursor().execute("DELETE FROM questions WHERE id = ?", (int(id_text),))
+                conn.cursor().execute("DELETE FROM clues WHERE id = ?", (int(id_text),))
                 conn.commit()
         self.db_table.removeRow(cur)
         self.db_status.setText("Row deleted.")
 
     def _on_reset_used_flags(self):
         with self._get_db_conn() as conn:
-            conn.cursor().execute("UPDATE questions SET is_used = 0")
+            conn.cursor().execute("UPDATE clues SET is_used = 0")
             conn.commit()
         self._refresh_database_table()
         self._load_board_for_round(self.current_round)
@@ -2085,7 +2389,7 @@ class HostControllerWindow(QMainWindow):
                     round_id = int(self.db_table.item(r, 1).text() or 1)
                     col_idx = int(self.db_table.item(r, 2).text() or 0)
                     row_idx = int(self.db_table.item(r, 3).text() or 0)
-                    cat_name = self.db_table.item(r, 4).text()
+                    cat_name = self.db_table.item(r, 4).text().strip() or "Category"
                     points = int(self.db_table.item(r, 5).text() or 0)
                     q_text = self.db_table.item(r, 6).text()
                     ans_text = self.db_table.item(r, 7).text()
@@ -2093,16 +2397,31 @@ class HostControllerWindow(QMainWindow):
                     is_dd = 1 if self.db_table.item(r, 9).checkState() == Qt.Checked else 0
                     is_used = 1 if self.db_table.item(r, 10).checkState() == Qt.Checked else 0
 
+                    # Resolve or create category_id in underlying categories table
+                    cursor.execute(
+                        "SELECT id FROM categories WHERE name = ? AND round_id = ? LIMIT 1",
+                        (cat_name, round_id),
+                    )
+                    cat_row = cursor.fetchone()
+                    if cat_row:
+                        cat_id = cat_row["id"]
+                    else:
+                        cursor.execute(
+                            "INSERT INTO categories (name, round_id, description, is_active) VALUES (?, ?, '', 1)",
+                            (cat_name, round_id),
+                        )
+                        cat_id = cursor.lastrowid
+
                     if id_text == "NEW":
                         cursor.execute("""
-                        INSERT INTO questions (round_id, col_index, row_index, category_name, points, question_text, answer_text, asset_filename, is_daily_double, is_used)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (round_id, col_idx, row_idx, cat_name, points, q_text, ans_text, asset, is_dd, is_used))
+                        INSERT INTO clues (category_id, round_id, col_index, row_index, points, clue_text, answer_text, asset_filename, is_daily_double, is_used, is_ongame)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """, (cat_id, round_id, col_idx, row_idx, points, q_text, ans_text, asset, is_dd, is_used))
                     else:
                         cursor.execute("""
-                        UPDATE questions SET round_id=?, col_index=?, row_index=?, category_name=?, points=?, question_text=?, answer_text=?, asset_filename=?, is_daily_double=?, is_used=?
+                        UPDATE clues SET category_id=?, round_id=?, col_index=?, row_index=?, points=?, clue_text=?, answer_text=?, asset_filename=?, is_daily_double=?, is_used=?
                         WHERE id = ?
-                        """, (round_id, col_idx, row_idx, cat_name, points, q_text, ans_text, asset, is_dd, is_used, int(id_text)))
+                        """, (cat_id, round_id, col_idx, row_idx, points, q_text, ans_text, asset, is_dd, is_used, int(id_text)))
                 conn.commit()
 
             self._refresh_database_table()
@@ -2144,7 +2463,7 @@ class HostControllerWindow(QMainWindow):
         dock_header.addWidget(self.btn_dock_toggle)
         dock_layout.addLayout(dock_header)
 
-        # 1. COMPACT BAR WIDGET (Collapsed state: slim row of 3 player scores)
+        # 1. COMPACT BAR WIDGET
         self.dock_compact_widget = QWidget()
         compact_layout = QHBoxLayout(self.dock_compact_widget)
         compact_layout.setContentsMargins(4, 2, 4, 2)
@@ -2161,7 +2480,7 @@ class HostControllerWindow(QMainWindow):
         self.dock_compact_widget.setVisible(False)
         dock_layout.addWidget(self.dock_compact_widget)
 
-        # 2. DETAILED WIDGET (Expanded state)
+        # 2. DETAILED WIDGET
         self.dock_detailed_widget = QWidget()
         detailed_layout = QVBoxLayout(self.dock_detailed_widget)
         detailed_layout.setContentsMargins(0, 0, 0, 0)
@@ -2250,7 +2569,6 @@ class HostControllerWindow(QMainWindow):
         self.resizeDocks([self.score_dock], [260], Qt.Vertical)
 
     def _toggle_dock_collapse(self):
-        """Toggle collapsed / expanded live scoring console."""
         self.is_dock_collapsed = not getattr(self, "is_dock_collapsed", False)
         if self.is_dock_collapsed:
             self.dock_detailed_widget.setVisible(False)
@@ -2262,29 +2580,17 @@ class HostControllerWindow(QMainWindow):
             self.btn_dock_toggle.setText("[-] Collapse")
 
     def _update_buzzer_lockout_ui(self):
-        """Placeholder for future contestant buzzer lockout UI."""
         pass
-
-    def _enable_buzzers_manual(self):
-        """Placeholder for arming buzzers."""
-        pass
-
-    def _lock_buzzers_manual(self):
-        """Placeholder for locking buzzers."""
-        pass
-
-    def keyPressEvent(self, event):
-        super().keyPressEvent(event)
 
     def _adjust_score(self, player_id, points, is_correct):
-        """Award/deduct score and broadcast updates."""
         if points <= 0:
             return
         if is_correct:
             self.s_engine.add_correct(player_id, points)
+            event_bus.play_sound_event.emit("correct")
         else:
             self.s_engine.add_incorrect(player_id, points)
-            event_bus.play_sound_event.emit("timeout")
+            event_bus.play_sound_event.emit("wrong")
 
         scores = self.s_engine.get_all_scores()
         for pid in ("p1", "p2", "p3"):
@@ -2292,6 +2598,7 @@ class HostControllerWindow(QMainWindow):
         event_bus.modify_score.emit(player_id, points, is_correct)
         event_bus.score_updated.emit(scores)
         self._update_live_score_display()
+        self._refresh_dd_player_combo()
 
     def _on_buzzer_pressed(self, player_id):
         if self.buzzer_locked or player_id in self.excluded_buzzers:
@@ -2302,8 +2609,6 @@ class HostControllerWindow(QMainWindow):
         self._update_buzzer_lockout_ui()
         event_bus.set_buzzer_lockout.emit(True)
         event_bus.trigger_buzzer_press.emit(player_id)
-        event_bus.play_sound_event.emit("time_out")
-
         self._start_host_timer_5s()
 
     def _reset_buzzers(self):
@@ -2336,7 +2641,7 @@ class HostControllerWindow(QMainWindow):
         self._update_host_timer_display()
         if self.host_timer_remaining_ms <= 0:
             self.host_timer_5s.stop()
-            event_bus.play_sound_event.emit("time_out")
+            event_bus.play_sound_event.emit("timeout")
             self.host_timer_lbl.setText("00.0s - TIME OUT!")
             self.host_timer_lbl.setStyleSheet("font-size: 20px; font-weight: 900; color: #f85149; font-family: monospace;")
 
@@ -2390,16 +2695,7 @@ class HostControllerWindow(QMainWindow):
                 color = "#f85149" if sc < 0 else "#3fb950"
                 self.compact_score_labels[p_id].setStyleSheet(f"font-size: 13px; font-weight: 800; color: {color}; background: #0d1117; padding: 4px 12px; border-radius: 4px; border: 1px solid #21262d;")
 
-            if hasattr(self, "wager_notes") and p_id in self.wager_notes:
-                max_w = max(sc, 1000)
-                self.wager_notes[p_id].setText(f"Current Score: ${sc} (Max Wager: ${max_w})")
-                if hasattr(self, "wager_spins") and p_id in self.wager_spins:
-                    if not self.chk_manual_override.isChecked():
-                        self.wager_spins[p_id].setRange(0, max_w)
-
-    # -------------------------------------------------------------------------
-    # EVENT BUS HANDLERS
-    # -------------------------------------------------------------------------
+        self._refresh_final_wagers_ui()
 
     def _register_event_bus(self):
         event_bus.score_updated.connect(self._on_score_updated)
@@ -2427,13 +2723,8 @@ class HostControllerWindow(QMainWindow):
                 self._load_board_for_round(round_id)
 
 
-# Backward compatibility alias
 HostController = HostControllerWindow
 
-
-# =============================================================================
-# STANDALONE ENTRY POINT
-# =============================================================================
 
 def main():
     app = QApplication(sys.argv)

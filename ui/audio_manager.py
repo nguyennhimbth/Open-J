@@ -1,33 +1,42 @@
 """Open-J Studio Audio Subsystem.
 Manages SFX and background music playback decoupled via EventBus.
-Uses QSoundEffect for low-latency RAM-cached short sound effects,
-round-robin pool for rapid sequential coin fill sounds,
-and QMediaPlayer + QAudioOutput for longer theme music (think_music / think_30s).
-Handles audio device changes gracefully and guarantees absolute silence if audio files are missing.
+Fixes triple-instance playback bug via Singleton pattern, supports both .wav (QSoundEffect)
+and compressed .mp3/.m4a/.aac/.ogg (QMediaPlayer), removes folder-level alias hijacking,
+and adds play_file() for Settings preview.
 """
 
 import os
-import time
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import QObject, Slot, QUrl, QTimer
+from PySide6.QtCore import QObject, Slot, QUrl
 from PySide6.QtMultimedia import QSoundEffect, QMediaPlayer, QAudioOutput, QMediaDevices
 
 from core.event_bus import event_bus
 
 
 class AudioManager(QObject):
-    """Manages all television broadcast sound effects and background music.
-    Adheres strictly to Absolute Silence Principle:
-    - Never play system beeps, demo tones, or simulated audio.
-    - Only play audio when assigned file exists on disk.
+    """Singleton broadcast audio manager.
+    Guarantees:
+    - Only ONE instance connects to event_bus.play_sound_event (preventing overlapping multi-playback).
+    - No hidden folder-level alias substitution or hardcoded fallback audio.
+    - Supports both .wav (via QSoundEffect) and .mp3/.m4a/.aac/.ogg (via QMediaPlayer).
     """
 
-    DEFAULT_SOUND_MAP = {}
+    _instance: Optional["AudioManager"] = None
+    _initialized: bool = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(self, sounds_dir=None, parent=None):
+        if self.__class__._initialized:
+            return
         super().__init__(parent)
+        self.__class__._initialized = True
+
         if sounds_dir is None:
             self.sounds_dir = Path(__file__).resolve().parent / "assets" / "sounds"
         else:
@@ -35,228 +44,183 @@ class AudioManager(QObject):
 
         self.sound_files: Dict[str, str] = {}
         self.effects: Dict[str, QSoundEffect] = {}
-
-        # Audio Output & Media Player for Long Theme Music (think_music)
-        self.audio_output = QAudioOutput(self)
-        self.audio_output.setVolume(0.85)
-        self.player = QMediaPlayer(self)
-        self.player.setAudioOutput(self.audio_output)
-
-        # Cache of QSoundEffect objects for low latency SFX
         self.sfx_effects: Dict[str, QSoundEffect] = self.effects
 
-        # Round-robin pool of 4 QSoundEffects specifically for sequential fill ticker (coin drop)
-        self.fill_pool = []
-        self.fill_pool_index = 0
-        self.last_fill_time = 0.0
+        # Long BGM Player (think_30s, outro_music)
+        self.bgm_output = QAudioOutput(self)
+        self.bgm_output.setVolume(0.85)
+        self.player = QMediaPlayer(self)
+        self.player.setAudioOutput(self.bgm_output)
 
-        self._init_sfx_cache()
-        self._init_fill_pool()
+        # Short compressed SFX Player (for .mp3 / .m4a / .ogg SFX files & Settings preview)
+        self.sfx_output = QAudioOutput(self)
+        self.sfx_output.setVolume(0.85)
+        self.sfx_player = QMediaPlayer(self)
+        self.sfx_player.setAudioOutput(self.sfx_output)
 
-        # Listen for OS audio endpoint changes (e.g. HDMI hotplug)
+        # Listen for OS audio endpoint changes
         try:
             self.devices = QMediaDevices(self)
             self.devices.audioOutputsChanged.connect(self._on_audio_device_changed)
         except Exception as e:
             print(f"[AudioManager] Warning connecting QMediaDevices: {e}")
 
-        # Connect to EventBus
+        # Connect to EventBus (exactly once via singleton)
         event_bus.play_sound_event.connect(self.play_sound)
+        event_bus.update_theme_config.connect(self._on_theme_updated)
+
+    @Slot(dict)
+    def _on_theme_updated(self, theme_data: dict):
+        if isinstance(theme_data, dict):
+            sounds_dict = theme_data.get("sounds", {})
+            if isinstance(sounds_dict, dict):
+                self.load_from_dict(sounds_dict)
 
     def _resolve_sound_path(self, file_or_path: str) -> Optional[Path]:
-        """Kiểm tra sự tồn tại của file âm thanh, trả về Path hoặc None (im lặng tuyệt đối)."""
+        """Resolves an explicitly assigned sound file path without substituting unrelated sounds."""
         if not file_or_path:
             return None
         p = Path(file_or_path)
-        if p.is_absolute() and p.exists():
+        if p.is_absolute() and p.is_file():
             return p
 
-        # Check in self.sounds_dir
-        cand = self.sounds_dir / p.name
-        if cand.exists():
-            return cand
+        # Relative to project root or assets
+        project_root = Path(__file__).resolve().parent.parent
+        for base in (project_root, project_root / "ui", self.sounds_dir.parent, self.sounds_dir):
+            cand = (base / file_or_path).resolve()
+            if cand.is_file():
+                return cand
 
-        # Check aliases
-        aliases = {
-            "coin_drop.wav": "fill.wav",
-            "fill.wav": "coin_drop.wav",
-            "board_fill_single.wav": "fill.wav",
-            "dd_laser.wav": "daily_double.wav",
-            "daily_double.wav": "dd_laser.wav",
-            "times_up.wav": "timeout.wav",
-            "timeout.wav": "times_up.wav",
-            "time_out.wav": "timeout.wav",
-            "buzzer.wav": "timeout.wav",
-        }
-        if p.name in aliases:
-            cand_alt = self.sounds_dir / aliases[p.name]
-            if cand_alt.exists():
-                return cand_alt
+        cand_name = self.sounds_dir / p.name
+        if cand_name.is_file():
+            return cand_name
 
         return None
 
-    def _init_sfx_cache(self):
-        """Nạp các hiệu ứng âm thanh ngắn vào RAM để phát ngay lập tức."""
-        self.sfx_effects.clear()
-        for key, file_name in self.sound_files.items():
-            if key in ("think_music", "think_30s"):
-                continue
-            full_path = self._resolve_sound_path(file_name)
-            if full_path:
-                try:
-                    effect = QSoundEffect(self)
-                    effect.setSource(QUrl.fromLocalFile(str(full_path)))
-                    effect.setVolume(0.85)
-                    self.sfx_effects[key] = effect
-                except Exception as e:
-                    print(f"[AudioManager] Warning loading SFX '{key}': {e}")
-
-    def _init_fill_pool(self):
-        """Khởi tạo pool 4 sound effect độc lập cho hiệu ứng lật ô liên tục."""
-        self.fill_pool.clear()
-        fill_path = self._resolve_sound_path(self.sound_files.get("fill", "coin_drop.wav"))
-        if fill_path:
-            for _ in range(4):
-                try:
-                    eff = QSoundEffect(self)
-                    eff.setSource(QUrl.fromLocalFile(str(fill_path)))
-                    eff.setVolume(0.75)
-                    self.fill_pool.append(eff)
-                except Exception:
-                    pass
-
     def _on_audio_device_changed(self):
-        """Tự động cập nhật audio endpoint khi cắm/rút thiết bị âm thanh."""
         try:
             default_dev = QMediaDevices.defaultAudioOutput()
-            self.audio_output.setDevice(default_dev)
-            print(f"[AudioManager] Audio output re-routed to: {default_dev.description()}")
+            self.bgm_output.setDevice(default_dev)
+            self.sfx_output.setDevice(default_dev)
         except Exception as e:
             print(f"[AudioManager] Audio device update notice: {e}")
 
     def load_sound(self, key: str, path: str):
-        """Tải âm thanh từ file cụ thể. Nếu không tồn tại -> im lặng 100%."""
         self.set_sound_file(key, path)
 
     def set_sound_file(self, event_key: str, file_path: str):
-        """Gán file âm thanh cho một event key cụ thể."""
+        """Assigns an audio file to a specific event key (or clears it if empty)."""
+        file_path = (file_path or "").strip()
         if not file_path:
             self.sound_files.pop(event_key, None)
             self.sfx_effects.pop(event_key, None)
             return
 
         p = self._resolve_sound_path(file_path)
-        if p and os.path.isfile(str(p)):
+        if p and p.is_file():
             self.sound_files[event_key] = str(p)
-            if event_key not in ("think_music", "think_30s"):
+            # Only cache uncompressed .wav in QSoundEffect; .mp3/.m4a use sfx_player
+            if event_key not in ("think_30s", "think_music", "outro_music") and p.suffix.lower() == ".wav":
                 try:
                     effect = QSoundEffect(self)
                     effect.setSource(QUrl.fromLocalFile(str(p)))
                     effect.setVolume(0.85)
                     self.sfx_effects[event_key] = effect
-                    if event_key in ("fill", "board_fill"):
-                        self._init_fill_pool()
                 except Exception as e:
-                    print(f"[AudioManager] Error updating SFX '{event_key}': {e}")
+                    print(f"[AudioManager] Error caching WAV '{event_key}': {e}")
+            else:
+                self.sfx_effects.pop(event_key, None)
         else:
-            # Nếu file không tồn tại, gỡ bỏ để giữ im lặng tuyệt đối
             self.sound_files.pop(event_key, None)
             self.sfx_effects.pop(event_key, None)
 
     def load_from_dict(self, sounds_dict: Dict[str, str]):
-        """Nạp toàn bộ cấu hình âm thanh từ theme dict."""
+        """Synchronizes all sound bindings from theme dictionary (clearing removed ones)."""
+        self.sound_files.clear()
+        self.sfx_effects.clear()
         for k, v in sounds_dict.items():
-            if v:
-                self.set_sound_file(k, v)
+            if k == "wager_music":
+                continue
+            self.set_sound_file(k, v)
+
+    def play_file(self, file_path: str):
+        """Directly plays any audio file path (used by Settings 'Play' preview button and Outro music)."""
+        p = self._resolve_sound_path(file_path)
+        if not p or not p.is_file():
+            return
+        self.stop_all()
+        try:
+            self.sfx_player.setSource(QUrl.fromLocalFile(str(p)))
+            self.sfx_player.play()
+        except Exception as e:
+            print(f"[AudioManager] Preview play_file error: {e}")
 
     def play(self, key: str):
-        """Alias phát âm thanh theo key."""
         self.play_sound(key)
 
     @Slot(str)
     def play_sound(self, sound_key: str):
-        """Phát âm thanh theo key. Nếu không có file hoặc file hỏng -> im lặng tuyệt đối."""
+        """Plays the exact sound assigned to sound_key. Strictly silent if unassigned."""
+        if not sound_key or sound_key == "wager_music":
+            return
+
+        # Canonicalize legacy callers without cross-mixing distinct events
+        canonical_map = {
+            "fill": "board_fill",
+            "think_music": "think_30s",
+            "time_out": "timeout",
+            "category_intro": "final_category_intro",
+        }
+        mapped_key = sound_key if sound_key in self.sound_files else canonical_map.get(sound_key, sound_key)
+
+        file_path = self.sound_files.get(mapped_key, "")
+        if not file_path:
+            return
+
+        full_path = self._resolve_sound_path(file_path)
+        if not full_path or not full_path.is_file():
+            return
+
         try:
-            # 1. Âm thanh Mở bảng (Phát duy nhất 1 lần hoàn chỉnh khi bắt đầu)
-            if sound_key in ("fill", "board_fill"):
-                # Ưu tiên key board_fill hoặc fill
-                target_key = "board_fill" if "board_fill" in self.sfx_effects else "fill"
-                if target_key in self.sfx_effects:
-                    eff = self.sfx_effects[target_key]
-                    eff.stop()
-                    eff.play()
-                    return
-                elif self.fill_pool:
-                    eff = self.fill_pool[0]
-                    eff.stop()
-                    eff.play()
-                    return
-
-            # Map alias keys
-            mapped_key = sound_key
-            if mapped_key == "time_out" and "time_out" not in self.sfx_effects:
-                mapped_key = "timeout"
-            elif mapped_key == "timeout" and "timeout" not in self.sfx_effects:
-                mapped_key = "time_out"
-
-            # 2. Nhạc nền suy nghĩ 30s (QMediaPlayer)
-            if mapped_key in ("think_music", "think_30s"):
-                fn = self.sound_files.get(mapped_key, self.sound_files.get("think_music", "think_30s.wav"))
-                full_path = self._resolve_sound_path(fn)
-                if full_path:
-                    self.player.stop()
-                    self.player.setSource(QUrl.fromLocalFile(str(full_path)))
-                    self.player.play()
-                else:
-                    self.player.stop()
-                    self.player.setSource(QUrl())
+            # Long tracks (think_30s, outro_music) use self.player
+            if mapped_key in ("think_30s", "outro_music"):
+                self.player.stop()
+                self.player.setSource(QUrl.fromLocalFile(str(full_path)))
+                self.player.play()
                 return
 
-            # 3. Các hiệu ứng SFX khác (QSoundEffect cached)
-            if mapped_key in self.sfx_effects:
+            # WAV SFX cached in QSoundEffect
+            if full_path.suffix.lower() == ".wav":
+                if mapped_key not in self.sfx_effects:
+                    eff = QSoundEffect(self)
+                    eff.setSource(QUrl.fromLocalFile(str(full_path)))
+                    eff.setVolume(0.85)
+                    self.sfx_effects[mapped_key] = eff
                 eff = self.sfx_effects[mapped_key]
                 eff.stop()
                 eff.play()
                 return
 
-            # 4. Fallback nạp lười nếu chưa nạp trước
-            fn = self.sound_files.get(mapped_key) or self.sound_files.get(sound_key)
-            if fn:
-                full_path = self._resolve_sound_path(fn)
-                if full_path:
-                    effect = QSoundEffect(self)
-                    effect.setSource(QUrl.fromLocalFile(str(full_path)))
-                    effect.setVolume(0.85)
-                    self.sfx_effects[mapped_key] = effect
-                    effect.play()
-            if fn:
-                full_path = self._resolve_sound_path(fn)
-                if full_path:
-                    effect = QSoundEffect(self)
-                    effect.setSource(QUrl.fromLocalFile(str(full_path)))
-                    effect.setVolume(0.85)
-                    self.sfx_effects[sound_key] = effect
-                    effect.play()
-            # Nếu không tìm thấy file -> GIỮ IM LẶNG HOÀN TOÀN, không bíp demo
+            # Compressed SFX (.mp3, .m4a, .aac, .ogg) use self.sfx_player
+            self.sfx_player.stop()
+            self.sfx_player.setSource(QUrl.fromLocalFile(str(full_path)))
+            self.sfx_player.play()
         except Exception as ex:
-            print(f"[AudioManager] Audio playback error: {ex}")
+            print(f"[AudioManager] Audio playback error for '{sound_key}': {ex}")
 
     def stop_music(self):
-        """Stop 30s background music immediately."""
         try:
             self.player.stop()
         except Exception:
             pass
 
     def stop_all(self):
-        """Stop all sounds immediately (BGM, SFX, fill tickers)."""
         self.stop_music()
-        for effect in self.sfx_effects.values():
-            try:
-                effect.stop()
-            except Exception:
-                pass
-        for effect in self.fill_pool:
+        try:
+            self.sfx_player.stop()
+        except Exception:
+            pass
+        for effect in list(self.sfx_effects.values()):
             try:
                 effect.stop()
             except Exception:
