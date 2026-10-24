@@ -746,18 +746,18 @@ class HostControllerWindow(QMainWindow):
     def _on_lock_roster(self):
         DBManager().activate_game_categories()
 
-        self._break_active = False
+        # Giữ nguyên màn hình chờ (logo to), không tắt Standby khi bắt đầu trận đấu
+        self._break_active = True
         if hasattr(self, "btn_commercial_break"):
-            self.btn_commercial_break.setText("CHẾ ĐỘ CHỜ / QUẢNG CÁO (STANDBY)")
+            self.btn_commercial_break.setText("RESUME GAMEPLAY (RETURN TO BOARD)")
             self.btn_commercial_break.setStyleSheet("""
                 QPushButton {
-                    background-color: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+                    background-color: #238636; border: 1px solid #2ea043; color: #ffffff;
                     font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
                 }
-                QPushButton:hover { background-color: #30363d; border-color: #d29922; color: #d29922; }
+                QPushButton:hover { background-color: #2ea043; }
             """)
-        event_bus.stop_standby_media.emit()
-        event_bus.trigger_standby_mode.emit("off")
+        event_bus.trigger_standby_mode.emit("normal")
 
         player_names = []
         for p_id in ("p1", "p2", "p3"):
@@ -1876,7 +1876,8 @@ class HostControllerWindow(QMainWindow):
             if (hasattr(self, "chk_manual_override") and self.chk_manual_override.isChecked())
             else (self.final_clue_data["category_name"] if self.final_clue_data else "FINAL JEOPARDY")
         )
-        event_bus.trigger_final_step.emit(1, {"category": cat_name})
+        # CHÚ Ý: Không tự động emit trigger_final_step(1) khi reset sequence ở hậu trường.
+        # Splash Final chỉ hiển thị lên TV khi MC chủ động nhấn nút [1. SHOW SPLASH] (_on_show_splash).
 
     def _on_manual_override_toggled(self, checked):
         self.manual_frame.setVisible(checked)

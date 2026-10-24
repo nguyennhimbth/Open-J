@@ -730,13 +730,13 @@ class TVCategoryCardWidget(QWidget):
     def __init__(self, logo_path=None, parent=None):
         super().__init__(parent)
         self.logo_path = logo_path
-        self.setStyleSheet(FLAT_CARD_STYLE)
+        self.setStyleSheet("background-color: #000000; border: none;")
 
         self.title = "CATEGORY"
         self.bg_color = QColor("#060CE9")
         self.bg_pixmap: Optional[QPixmap] = None
 
-        # Layer 1: Full-bleed Blue Card Box (100% width & height)
+        # Layer 1: Blue Card Box (90% width & height, centered to create black border)
         self.inner_box = _CoverImageWidget(self, mode="cover")
         self.inner_box.set_bg_color(self.bg_color)
 
@@ -807,13 +807,21 @@ class TVCategoryCardWidget(QWidget):
             self.anim.finished.connect(finished_callback)
         self.anim.start()
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#000000"))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         w, h = self.width(), self.height()
-        # Requirement #1, #3 & #6: Fill 100% of window (no 90% shrink margin!)
-        self.inner_box.setGeometry(0, 0, w, h)
-        self.title_label.setGeometry(40, 30, max(1, w - 80), max(1, h - 60))
-        self.logo_overlay.setGeometry(0, 0, w, h)
+        # Framing: Cụm Logo + Chủ đề được thu nhỏ 10% (đạt kích thước 90%) và căn giữa để tạo viền đen
+        card_w = max(100, int(w * 0.90))
+        card_h = max(100, int(h * 0.90))
+        card_x = (w - card_w) // 2
+        card_y = (h - card_h) // 2
+        self.inner_box.setGeometry(card_x, card_y, card_w, card_h)
+        self.title_label.setGeometry(30, 30, max(1, card_w - 60), max(1, card_h - 60))
+        self.logo_overlay.setGeometry(0, 0, card_w, card_h)
 
 
 class TVCategoryRevealWidget(QWidget):
@@ -2156,6 +2164,11 @@ class TVDisplayWindow(QMainWindow):
             # Requirement #7: Use final_category_intro (distinct from round_category_intro and no wager_music)
             event_bus.play_sound_event.emit("final_category_intro")
         if step in (1, 2, 3):
+            # Nếu TV đang ở màn hình chờ (Standby Normal) và chưa vào vòng cuối (round 3)
+            # thì giữ nguyên màn hình chờ, chỉ nạp dữ liệu bước vào widget
+            if self.stack.currentIndex() == self.INDEX_STANDBY_NORMAL and getattr(self, "current_round", 1) != 3:
+                self.final_screen_widget.set_step(step, data)
+                return
             self.stack.setCurrentIndex(self.INDEX_FINAL)
             self.final_screen_widget.set_step(step, data)
 
