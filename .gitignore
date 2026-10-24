@@ -25,6 +25,7 @@ scratch/
 renders/
 *.log
 REFERENCE/
+*.bak
 
 # Database & Documentation
 questions.db/
