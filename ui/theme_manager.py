@@ -309,10 +309,12 @@ class ThemeConfigManager:
             "category_headers": {
                 "fit_mode": "stretch",
                 "auto_crop_logo": True,
+                "final_family": "ITC Korinna",
                 "unrevealed_image": cls.resolve_path("images/header_logo.png"),
                 "revealed_image": cls.resolve_path("images/header_revealed_bg.png"),
                 "font": {
                     "family": "ITC Korinna",
+                    "final_family": "ITC Korinna",
                     "size": 28,
                     "bold": True,
                     "color": "#FFFFFF",
@@ -368,6 +370,8 @@ class ThemeConfigManager:
                 "intro_video_path": "",
                 "intro_merge_seconds": 5.0,
                 "intro_fade_duration_ms": 1500,
+                "final_crossfade_mode": "auto",
+                "final_crossfade_seconds": 15,
                 "outro_music_path": "",
             },
             "sounds": {
@@ -447,6 +451,7 @@ class ThemeConfigManager:
             if ch_node is not None:
                 theme["category_headers"]["fit_mode"] = ch_node.attrib.get("fit_mode", "stretch")
                 theme["category_headers"]["auto_crop_logo"] = ch_node.attrib.get("auto_crop_logo", "true").lower() == "true"
+                theme["category_headers"]["final_family"] = ch_node.attrib.get("final_family", "ITC Korinna")
                 unrev = ch_node.find("StateUnrevealed")
                 if unrev is not None:
                     p_val = unrev.attrib.get("image_path") or unrev.attrib.get("path", "")
@@ -460,6 +465,9 @@ class ThemeConfigManager:
                 f_node = ch_node.find("Font")
                 if f_node is not None:
                     theme["category_headers"]["font"]["family"] = f_node.attrib.get("family", "ITC Korinna")
+                    if "final_family" in f_node.attrib:
+                        theme["category_headers"]["final_family"] = f_node.attrib["final_family"]
+                    theme["category_headers"]["font"]["final_family"] = theme["category_headers"]["final_family"]
                     theme["category_headers"]["font"]["size"] = int(f_node.attrib.get("size", 28))
                     theme["category_headers"]["font"]["bold"] = f_node.attrib.get("bold", "true").lower() == "true"
                     theme["category_headers"]["font"]["color"] = f_node.attrib.get("color", "#FFFFFF")
@@ -545,6 +553,8 @@ class ThemeConfigManager:
                 anim_cfg["intro_video_path"] = cls.resolve_path(iv_path, base_dir) if iv_path else ""
                 anim_cfg["intro_merge_seconds"] = float(anim_node.attrib.get("intro_merge_seconds", 5.0))
                 anim_cfg["intro_fade_duration_ms"] = int(anim_node.attrib.get("intro_fade_duration_ms", 1500))
+                anim_cfg["final_crossfade_mode"] = anim_node.attrib.get("final_crossfade_mode", "auto")
+                anim_cfg["final_crossfade_seconds"] = int(anim_node.attrib.get("final_crossfade_seconds", 15))
                 om_path = anim_node.attrib.get("outro_music_path", "").strip()
                 anim_cfg["outro_music_path"] = cls.resolve_path(om_path, base_dir) if om_path else ""
 
@@ -663,6 +673,7 @@ class ThemeConfigManager:
         ch_node = ET.SubElement(root, "CategoryHeaders", attrib={
             "fit_mode": str(ch_data.get("fit_mode", "stretch")),
             "auto_crop_logo": str(ch_data.get("auto_crop_logo", True)).lower(),
+            "final_family": str(ch_data.get("final_family") or ch_font.get("final_family", "ITC Korinna")),
         })
         ET.SubElement(ch_node, "StateUnrevealed", attrib={"image_path": unrev_path})
         ET.SubElement(ch_node, "StateRevealed", attrib={"image_path": rev_path})
@@ -755,6 +766,8 @@ class ThemeConfigManager:
             "intro_video_path": cls._to_relative_assets_path(anim_data.get("intro_video_path", "")),
             "intro_merge_seconds": str(float(anim_data.get("intro_merge_seconds", 5.0))),
             "intro_fade_duration_ms": str(int(anim_data.get("intro_fade_duration_ms", 1500))),
+            "final_crossfade_mode": str(anim_data.get("final_crossfade_mode", "auto")),
+            "final_crossfade_seconds": str(int(anim_data.get("final_crossfade_seconds", 15))),
             "outro_music_path": cls._to_relative_assets_path(anim_data.get("outro_music_path", "")),
         })
 

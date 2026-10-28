@@ -910,8 +910,7 @@ class TVCategoryRevealWidget(QWidget):
         self.anim_group.addAnimation(anim_in)
         self.anim_group.finished.connect(self._on_slide_finished)
 
-        # Requirement #7: Use round_category_intro sound (NOT hardcoded "fill"!)
-        event_bus.play_sound_event.emit("round_category_intro")
+        # Requirement 1: Removed audio for category intro of first 2 rounds
         self.anim_group.start()
 
     def _on_slide_finished(self):
@@ -1125,6 +1124,7 @@ class TVFinalScreenWidget(QWidget):
     STEP_SPLASH = 1
     STEP_CATEGORY = 2
     STEP_CLUE = 3
+    STEP_TIMER = 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1138,6 +1138,9 @@ class TVFinalScreenWidget(QWidget):
         self.red_pixmap: Optional[QPixmap] = None
         self.blue_color = QColor("#060CE9")
         self.red_color = QColor("#8B0000")
+
+        self.crossfade_mode = "auto"
+        self.crossfade_seconds = 15
 
         self.font_family = "ITC Korinna"
         self.font_size = 48
@@ -1235,6 +1238,10 @@ class TVFinalScreenWidget(QWidget):
         fg_layout.addWidget(self.clue_content_lbl, 1)
         self._update_visibility()
 
+    def set_crossfade_config(self, mode: str, seconds: int):
+        self.crossfade_mode = (mode or "auto").lower()
+        self.crossfade_seconds = max(1, int(seconds))
+
     def set_font_config(
         self,
         family: str,
@@ -1247,6 +1254,7 @@ class TVFinalScreenWidget(QWidget):
         shadow_dx: int = 3,
         shadow_dy: int = 3,
         shadow_blur: int = 2,
+        category_family: Optional[str] = None,
     ):
         """Synchronizes Final Jeopardy typography with Regular Clue Screen typography (Requirement #6)."""
         self.font_family = family
@@ -1260,9 +1268,10 @@ class TVFinalScreenWidget(QWidget):
         self.shadow_dy = int(shadow_dy)
         self.shadow_blur = int(shadow_blur)
 
+        cat_fam = category_family or family
         cat_target_size = max(36, int(self.header_font_size * 1.8)) if self.font_mode == "custom" else max(56, self.font_size)
         self.cat_name_lbl.max_point_size = max(54, cat_target_size)
-        self.cat_name_lbl.configure_typography(family, cat_target_size, self.font_bold, self.font_mode, color)
+        self.cat_name_lbl.configure_typography(cat_fam, cat_target_size, self.font_bold, self.font_mode, color)
 
         self.clue_content_lbl.max_point_size = max(48, self.font_size)
         self.clue_content_lbl.configure_typography(family, self.font_size, self.font_bold, self.font_mode, color)
@@ -1322,14 +1331,28 @@ class TVFinalScreenWidget(QWidget):
             self._update_visibility()
 
         elif step == self.STEP_CLUE:
+            # Step 3: Hiển thị câu hỏi trước, chưa bấm thời gian
             clue = data.get("question_text", "")
             self.clue_content_lbl.setText(str(clue).upper())
             self.blue_opacity.setOpacity(1.0)
             self.progress_bar.setValue(300)
             self.countdown_ms = 30000
+            self.countdown_timer.stop()
+            self.crossfade_timer.stop()
+            self._update_visibility()
+
+        elif step == self.STEP_TIMER:
+            # Step 4: Bắt đầu bấm thời gian & chuyển nền
+            self.blue_opacity.setOpacity(1.0)
+            self.progress_bar.setValue(300)
+            self.countdown_ms = 30000
             self.countdown_timer.start()
             self._update_visibility()
-            self.crossfade_timer.start(15000)
+            if self.crossfade_mode == "auto":
+                self.crossfade_timer.stop()
+                self.crossfade_timer.start(int(self.crossfade_seconds * 1000))
+            else:
+                self.crossfade_timer.stop()
 
     def restart_final_countdown(self):
         if hasattr(self, "crossfade_anim") and self.crossfade_anim.state() == QPropertyAnimation.Running:
@@ -1340,10 +1363,11 @@ class TVFinalScreenWidget(QWidget):
         self.progress_bar.setValue(300)
         self.countdown_timer.start()
         self.crossfade_timer.stop()
-        self.crossfade_timer.start(15000)
+        if self.crossfade_mode == "auto":
+            self.crossfade_timer.start(int(self.crossfade_seconds * 1000))
 
     def start_crossfade(self):
-        if self.step != self.STEP_CLUE:
+        if self.step not in (self.STEP_CLUE, self.STEP_TIMER):
             return
         if hasattr(self, "crossfade_anim") and self.crossfade_anim.state() == QPropertyAnimation.Running:
             return
@@ -1364,7 +1388,8 @@ class TVFinalScreenWidget(QWidget):
     def _update_visibility(self):
         self.splash_widget.setVisible(self.step == self.STEP_SPLASH)
         self.cat_widget.setVisible(self.step == self.STEP_CATEGORY)
-        self.clue_widget.setVisible(self.step == self.STEP_CLUE)
+        self.clue_widget.setVisible(self.step in (self.STEP_CLUE, self.STEP_TIMER))
+        self.progress_bar.setVisible(self.step == self.STEP_TIMER)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2160,10 +2185,13 @@ class TVDisplayWindow(QMainWindow):
     # --- FINAL JEOPARDY TRANSITIONS ---
     @Slot(int, dict)
     def handle_final_step(self, step: int, data: dict):
-        if step == 2:
+        if step == 1:
+            # FIX #3: Vòng 3 cũng dùng âm thanh hiện chủ đề giống vòng 1 & 2
+            event_bus.play_sound_event.emit("round_category_intro")
+        elif step == 2:
             # Requirement #7: Use final_category_intro (distinct from round_category_intro and no wager_music)
             event_bus.play_sound_event.emit("final_category_intro")
-        if step in (1, 2, 3):
+        if step in (1, 2, 3, 4):
             # Nếu TV đang ở màn hình chờ (Standby Normal) và chưa vào vòng cuối (round 3)
             # thì giữ nguyên màn hình chờ, chỉ nạp dữ liệu bước vào widget
             if self.stack.currentIndex() == self.INDEX_STANDBY_NORMAL and getattr(self, "current_round", 1) != 3:
@@ -2232,7 +2260,9 @@ class TVDisplayWindow(QMainWindow):
 
         cs_data = theme_data.get("clue_screen", {})
         cs_font = cs_data.get("font", {})
-        shared_family = cs_font.get("family") or f_info.get("family", "ITC Korinna")
+        cat_font_family = f_info.get("family", "ITC Korinna")
+        final_cat_family = ch_data.get("final_family") or f_info.get("final_family") or cat_font_family
+        shared_family = cs_font.get("family") or "ITC Korinna"
         shared_bold = bool(cs_font.get("bold", f_info.get("bold", True)))
         shared_color = cs_font.get("color") or f_info.get("color", "#FFFFFF")
         shared_mode = cs_font.get("mode") or f_info.get("mode", "dynamic")
@@ -2242,7 +2272,7 @@ class TVDisplayWindow(QMainWindow):
 
         for cell in self.cat_cells:
             cell.set_images(unrev_p, rev_p, fit_m, auto_crop_logo=auto_crop_logo)
-            cell.set_font_config(shared_family, header_pt_size, shared_bold, shared_color, mode=shared_mode)
+            cell.set_font_config(cat_font_family, header_pt_size, shared_bold, shared_color, mode=shared_mode)
 
         # 3. Point Grid
         pg_data = theme_data.get("point_grid", {})
@@ -2303,13 +2333,14 @@ class TVDisplayWindow(QMainWindow):
             shadow_dx=sh_dx,
             shadow_dy=sh_dy,
             shadow_blur=sh_blur,
+            category_family=final_cat_family,
         )
 
         # 6. Category Reveal Logo & Style
         logo_cand = unrev_p if unrev_p and os.path.exists(unrev_p) else theme_data.get("logo_path", "")
         self.cat_reveal_widget.set_logo_path(logo_cand, auto_crop=auto_crop_logo)
         self.cat_reveal_widget.set_card_style(rev_p, std_col)
-        self.cat_reveal_widget.set_font_config(shared_family, header_pt_size, shared_bold, shared_color, mode=shared_mode)
+        self.cat_reveal_widget.set_font_config(cat_font_family, header_pt_size, shared_bold, shared_color, mode=shared_mode)
 
         # 7. Standby Screen Wallpaper (Static & Mosaic 36)
         sb_img = theme_data.get("standby_screen", {}).get("image_path", "")
@@ -2326,6 +2357,9 @@ class TVDisplayWindow(QMainWindow):
         self.zoom_duration_ms = int(anim_cfg.get("zoom_duration_ms", 400))
         self.enable_dd_flip = bool(anim_cfg.get("enable_dd_flip", True))
         self.flip_duration_ms = int(anim_cfg.get("flip_duration_ms", 900))
+        self.final_crossfade_mode = anim_cfg.get("final_crossfade_mode", "auto")
+        self.final_crossfade_seconds = int(anim_cfg.get("final_crossfade_seconds", 15))
+        self.final_screen_widget.set_crossfade_config(self.final_crossfade_mode, self.final_crossfade_seconds)
 
         # 9. Audio Manager Sync
         sounds_dict = theme_data.get("sounds", {})

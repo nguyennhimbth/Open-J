@@ -452,7 +452,8 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(18)
 
-        ch_font = self.theme.get("category_headers", {}).get("font", {})
+        ch_data = self.theme.get("category_headers", {})
+        ch_font = ch_data.get("font", {})
         cs_data = self.theme.get("clue_screen", {})
         cs_font = cs_data.get("font", {})
         sh_data = cs_data.get("shadow", {})
@@ -474,11 +475,8 @@ class SettingsDialog(QDialog):
         lbl_sec1_info.setStyleSheet("color: #8b949e; font-style: italic;")
         sec1_layout.addRow(lbl_sec1_info)
 
-        # Font Family + Bold + Color
-        fam_row = QHBoxLayout()
-        self.font_combo_shared = QFontComboBox()
-        init_family = cs_font.get("family") or ch_font.get("family", "ITC Korinna")
-        self.font_combo_shared.setCurrentFont(QFont(init_family))
+        # Shared Style Controls (Bold + Color)
+        style_row = QHBoxLayout()
         self.chk_shared_bold = QCheckBox("Bold")
         self.chk_shared_bold.setChecked(bool(cs_font.get("bold", True)))
 
@@ -486,11 +484,34 @@ class SettingsDialog(QDialog):
         self.btn_shared_color = QPushButton(f"Color ({self.shared_font_color})")
         self.btn_shared_color.setStyleSheet(f"background-color: {self.shared_font_color}; color: #000000; font-weight: bold;")
         self.btn_shared_color.clicked.connect(self._choose_shared_font_color)
+        style_row.addWidget(self.chk_shared_bold)
+        style_row.addWidget(self.btn_shared_color)
+        style_row.addStretch()
+        sec1_layout.addRow("Font Style & Color:", style_row)
 
-        fam_row.addWidget(self.font_combo_shared, 1)
-        fam_row.addWidget(self.chk_shared_bold)
-        fam_row.addWidget(self.btn_shared_color)
-        sec1_layout.addRow("Shared Font Family & Style:", fam_row)
+        # 1a. Font Family riêng cho Tiêu đề 6 chủ đề (Vòng 1 & 2)
+        cat_fam_row = QHBoxLayout()
+        self.font_combo_cat = QFontComboBox()
+        init_cat_family = ch_font.get("family", "ITC Korinna")
+        self.font_combo_cat.setCurrentFont(QFont(init_cat_family))
+        cat_fam_row.addWidget(self.font_combo_cat, 1)
+        sec1_layout.addRow("Category Header Font (Tiêu đề 6 chủ đề Vòng 1 & 2):", cat_fam_row)
+
+        # 1b. Font Family riêng cho Tiêu đề chủ đề Vòng cuối (Final Round Category Header)
+        final_cat_fam_row = QHBoxLayout()
+        self.font_combo_final_cat = QFontComboBox()
+        init_final_cat_family = ch_data.get("final_family") or ch_font.get("final_family") or init_cat_family
+        self.font_combo_final_cat.setCurrentFont(QFont(init_final_cat_family))
+        final_cat_fam_row.addWidget(self.font_combo_final_cat, 1)
+        sec1_layout.addRow("Final Category Font (Tiêu đề chủ đề Vòng cuối):", final_cat_fam_row)
+
+        # 1c. Font Family riêng cho Câu hỏi & Đáp án (Clues & Answers)
+        clue_fam_row = QHBoxLayout()
+        self.font_combo_clue = QFontComboBox()
+        init_clue_family = cs_font.get("family", "ITC Korinna")
+        self.font_combo_clue.setCurrentFont(QFont(init_clue_family))
+        clue_fam_row.addWidget(self.font_combo_clue, 1)
+        sec1_layout.addRow("Clue & Answer Font (Font Câu hỏi & Đáp án):", clue_fam_row)
 
         # Sizing Mode: Dynamic vs Custom
         self.combo_shared_font_mode = QComboBox()
@@ -732,6 +753,32 @@ class SettingsDialog(QDialog):
         intro_layout.addRow("Live Broadcast Trigger:", act_row)
 
         layout.addWidget(intro_box)
+
+        # 3. Final Jeopardy Background Transition Mode (Auto vs Manual)
+        final_cf_box = QGroupBox("3. CHUYỂN NỀN VÒNG CUỐI (FINAL JEOPARDY BACKGROUND TRANSITION)")
+        final_cf_layout = QFormLayout(final_cf_box)
+        final_cf_layout.setSpacing(12)
+
+        self.combo_final_crossfade_mode = QComboBox()
+        self.combo_final_crossfade_mode.addItem("Tự động chuyển nền theo giây (Auto Crossfade)", "auto")
+        self.combo_final_crossfade_mode.addItem("Bấm nút thủ công trên Host Controller (Manual)", "manual")
+        init_cf_mode = anim_data.get("final_crossfade_mode", "auto")
+        self.combo_final_crossfade_mode.setCurrentIndex(0 if init_cf_mode == "auto" else 1)
+
+        self.spin_final_crossfade_sec = QSpinBox()
+        self.spin_final_crossfade_sec.setRange(1, 30)
+        self.spin_final_crossfade_sec.setValue(int(anim_data.get("final_crossfade_seconds", 15)))
+        self.spin_final_crossfade_sec.setSuffix(" giây")
+        self.spin_final_crossfade_sec.setEnabled(init_cf_mode == "auto")
+
+        self.combo_final_crossfade_mode.currentIndexChanged.connect(
+            lambda idx: self.spin_final_crossfade_sec.setEnabled(self.combo_final_crossfade_mode.currentData() == "auto")
+        )
+
+        final_cf_layout.addRow("Chế độ chuyển nền (Xanh -> Đỏ):", self.combo_final_crossfade_mode)
+        final_cf_layout.addRow("Thời gian tự động chuyển nền (khi chọn Tự động):", self.spin_final_crossfade_sec)
+
+        layout.addWidget(final_cf_box)
         layout.addStretch()
 
         scroll.setWidget(container)
@@ -956,8 +1003,10 @@ class SettingsDialog(QDialog):
         self.theme["bezel_width"] = self.spin_bezel_w.value()
         self.theme["bezel_color"] = self.bezel_color_val
 
-        # Shared Typography (Section 1 of Font Tab: Clue, Answer & Category Header)
-        shared_family = self.font_combo_shared.currentFont().family()
+        # Typography (Section 1 of Font Tab: Clue, Answer & Category Header)
+        cat_family = self.font_combo_cat.currentFont().family()
+        final_cat_family = self.font_combo_final_cat.currentFont().family()
+        clue_family = self.font_combo_clue.currentFont().family()
         shared_bold = self.chk_shared_bold.isChecked()
         shared_color = self.shared_font_color
         shared_mode = self.combo_shared_font_mode.currentData()
@@ -965,14 +1014,16 @@ class SettingsDialog(QDialog):
         clue_size = self.spin_clue_font_size.value()
         ans_size = self.spin_answer_font_size.value()
 
-        # Category Headers
+        # Category Headers (Font riêng cho tiêu đề 6 chủ đề vòng 1, 2 và chung kết)
         ch = self.theme.setdefault("category_headers", {})
         ch["unrevealed_image"] = self.edit_cat_unrev.text().strip()
         ch["revealed_image"] = self.edit_cat_rev.text().strip()
         ch["fit_mode"] = self.combo_cat_fit.currentText()
         ch["auto_crop_logo"] = self.chk_auto_crop_logo.isChecked()
+        ch["final_family"] = final_cat_family
         ch["font"] = {
-            "family": shared_family,
+            "family": cat_family,
+            "final_family": final_cat_family,
             "size": cat_size,
             "bold": shared_bold,
             "color": shared_color,
@@ -1006,7 +1057,7 @@ class SettingsDialog(QDialog):
         fin["use_image"] = bool(fin["image_path"])
 
         cs["font"] = {
-            "family": shared_family,
+            "family": clue_family,
             "size": clue_size,
             "answer_size": ans_size,
             "header_size": cat_size,
@@ -1038,6 +1089,9 @@ class SettingsDialog(QDialog):
         anim["intro_merge_seconds"] = self.spin_intro_merge_sec.value()
         anim["intro_fade_duration_ms"] = self.spin_intro_fade_ms.value()
         anim["outro_music_path"] = self.edit_outro_music.text().strip()
+        if hasattr(self, "combo_final_crossfade_mode"):
+            anim["final_crossfade_mode"] = self.combo_final_crossfade_mode.currentData()
+            anim["final_crossfade_seconds"] = self.spin_final_crossfade_sec.value()
 
         # Sounds (Individual bindings only, no wager_music)
         sounds = {}

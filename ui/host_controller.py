@@ -256,6 +256,7 @@ class HostControllerWindow(QMainWindow):
         self._build_central_tabs()
         self._build_bottom_dock()
         self._register_event_bus()
+        self._update_crossfade_mode_ui()
 
         # Load Data
         self._load_board_for_round(1)
@@ -628,6 +629,7 @@ class HostControllerWindow(QMainWindow):
             dlg.tab_widget.setCurrentIndex(initial_tab)
         if dlg.exec():
             self.theme = dlg.theme
+            self._update_crossfade_mode_ui()
 
     def _build_central_tabs(self):
         container = QWidget()
@@ -1118,7 +1120,6 @@ class HostControllerWindow(QMainWindow):
 
         elif self.intro_seq_state == "REVEAL":
             event_bus.trigger_category_step.emit(2, curr)
-            event_bus.play_sound_event.emit("round_category_intro")
             if curr < 5:
                 self.btn_intro_sequence.setText(f"SLIDE TO CATEGORY {curr+2} (LOGO)")
                 self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
@@ -1180,9 +1181,44 @@ class HostControllerWindow(QMainWindow):
             if reply == QMessageBox.Yes:
                 self.unlocked_rounds[2] = True
                 self.btn_finish_round.setText("COMPLETE ROUND 2 & UNLOCK FINAL JEOPARDY")
+                self.current_round = 2
                 self._update_round_button_styles()
-                self._on_round_button_clicked(2)
                 event_bus.unlock_round.emit(2)
+
+                # Reset board state for Round 2
+                self.tabs.setCurrentIndex(1)
+                event_bus.change_round.emit(2)
+                self._load_board_for_round(2)
+
+                # Reset controller state as at beginning of gameplay
+                self.selected_clue = None
+                self.selected_points = 400
+                self.dd_wager_frame.setVisible(False)
+                self._set_peek_placeholder()
+                self.btn_clue_reveal.setEnabled(True)
+
+                self.intro_col_index = 0
+                self.intro_seq_state = "SHOW"
+                self.btn_intro_sequence.setText("START CATEGORY INTRO")
+                self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+
+                for pid in ("p1", "p2", "p3"):
+                    if pid in self.score_cards:
+                        self.score_cards[pid]["btn_add"].setText("+$400")
+                        self.score_cards[pid]["btn_sub"].setText("-$400")
+
+                # Switch TV to advertising / standby screen
+                self._break_active = True
+                event_bus.trigger_standby_mode.emit("normal")
+                if hasattr(self, "btn_commercial_break"):
+                    self.btn_commercial_break.setText("RESUME GAMEPLAY (RETURN TO BOARD)")
+                    self.btn_commercial_break.setStyleSheet("""
+                        QPushButton {
+                            background-color: #238636; border: 1px solid #2ea043; color: #ffffff;
+                            font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
+                        }
+                        QPushButton:hover { background-color: #2ea043; }
+                    """)
         elif self.current_round == 2:
             reply = QMessageBox.question(
                 self,
@@ -1196,9 +1232,27 @@ class HostControllerWindow(QMainWindow):
                 self.btn_finish_round.setText("ALL ROUNDS COMPLETED")
                 self.btn_finish_round.setEnabled(False)
                 self.btn_finish_round.setStyleSheet("background-color: #21262d; color: #8b949e; font-size: 14px; font-weight: bold; padding: 10px 24px; border-radius: 6px; border: 1px solid #30363d;")
+                self.current_round = 3
                 self._update_round_button_styles()
-                self._on_round_button_clicked(3)
                 event_bus.unlock_round.emit(3)
+
+                # FIX #5: Khi bấm qua vòng 3, đưa màn hình chờ về chế độ quảng cáo
+                self._break_active = True
+                event_bus.trigger_standby_mode.emit("normal")
+                if hasattr(self, "btn_commercial_break"):
+                    self.btn_commercial_break.setText("RESUME GAMEPLAY (RETURN TO BOARD)")
+                    self.btn_commercial_break.setStyleSheet("""
+                        QPushButton {
+                            background-color: #238636; border: 1px solid #2ea043; color: #ffffff;
+                            font-weight: bold; padding: 5px 12px; border-radius: 5px; font-size: 12px;
+                        }
+                        QPushButton:hover { background-color: #2ea043; }
+                    """)
+
+                # Chuyển sang tab Final Jeopardy
+                self.tabs.setCurrentIndex(2)
+                event_bus.change_round.emit(3)
+                self._refresh_final_wagers_ui()
 
     def _update_round_button_styles(self):
         active = (
@@ -1248,6 +1302,26 @@ class HostControllerWindow(QMainWindow):
             self.tabs.setCurrentIndex(1)
             event_bus.change_round.emit(round_id)
             self._load_board_for_round(round_id)
+
+            # FIX #4: Reset bảng điều khiển khi chuyển sang vòng mới qua nút round
+            base_pts = 200 if round_id == 1 else 400
+            self.selected_clue = None
+            self.selected_points = base_pts
+            if hasattr(self, "dd_wager_frame"):
+                self.dd_wager_frame.setVisible(False)
+            self._set_peek_placeholder()
+            if hasattr(self, "btn_clue_reveal"):
+                self.btn_clue_reveal.setEnabled(True)
+            self.intro_col_index = 0
+            self.intro_seq_state = "SHOW"
+            if hasattr(self, "btn_intro_sequence"):
+                self.btn_intro_sequence.setText("START CATEGORY INTRO")
+                self.btn_intro_sequence.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 7px 14px; border-radius: 5px;")
+            for pid in ("p1", "p2", "p3"):
+                if hasattr(self, "score_cards") and pid in self.score_cards:
+                    self.score_cards[pid]["btn_add"].setText(f"+${base_pts}")
+                    self.score_cards[pid]["btn_sub"].setText(f"-${base_pts}")
+
         elif round_id == 3:
             self.tabs.setCurrentIndex(2)
             event_bus.change_round.emit(3)
@@ -1705,9 +1779,9 @@ class HostControllerWindow(QMainWindow):
         s2_layout.addWidget(self.btn_lock_wagers)
         layout.addWidget(self.step2_box)
 
-        # STEP 3: Reveal Clue & 30-Second Think Music
-        self.step3_box = QGroupBox("STEP 3: REVEAL FINAL CLUE & 30-SECOND THINK MUSIC")
-        self.step3_box.setMinimumHeight(180)
+        # STEP 3: Reveal Clue Text (No timer yet)
+        self.step3_box = QGroupBox("STEP 3: REVEAL FINAL CLUE (HIỆN CÂU HỎI TRƯỚC - CHƯA BẤM GIỜ)")
+        self.step3_box.setMinimumHeight(150)
         self.step3_box.setEnabled(False)
         s3_layout = QVBoxLayout(self.step3_box)
 
@@ -1716,10 +1790,27 @@ class HostControllerWindow(QMainWindow):
         self.final_clue_preview.setMaximumHeight(85)
         s3_layout.addWidget(self.final_clue_preview)
 
+        self.btn_reveal_final_clue = QPushButton("3. HIỆN CÂU HỎI LÊN TV (CHƯA BẤM GIỜ)")
+        self.btn_reveal_final_clue.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 8px 16px; border-radius: 4px;")
+        self.btn_reveal_final_clue.clicked.connect(self._on_reveal_final_clue)
+        s3_layout.addWidget(self.btn_reveal_final_clue)
+        layout.addWidget(self.step3_box)
+
+        # STEP 4: Start 30-Second Think Music & Crossfade
+        self.step4_box = QGroupBox("STEP 4: BẮT ĐẦU TÍNH GIỜ & CHUYỂN NỀN (30S THINK MUSIC & CROSSFADE)")
+        self.step4_box.setMinimumHeight(120)
+        self.step4_box.setEnabled(False)
+        s4_layout = QVBoxLayout(self.step4_box)
+
         t_layout = QHBoxLayout()
-        self.btn_start_30s = QPushButton("3. REVEAL CLUE & START 30S")
-        self.btn_start_30s.setStyleSheet("background-color: #1f6feb; color: white; font-weight: bold; padding: 8px 16px;")
+        self.btn_start_30s = QPushButton("4. BẮT ĐẦU TÍNH GIỜ (30S)")
+        self.btn_start_30s.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 8px 16px; border-radius: 4px;")
         self.btn_start_30s.clicked.connect(self._on_start_30s)
+
+        self.btn_manual_crossfade = QPushButton("CHUYỂN NỀN (XANH -> ĐỎ)")
+        self.btn_manual_crossfade.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 8px 16px; border-radius: 4px;")
+        self.btn_manual_crossfade.clicked.connect(self._on_manual_crossfade_clicked)
+        self.btn_manual_crossfade.setEnabled(False)
 
         self.btn_restart_final = QPushButton("RESTART 30S TIMER")
         self.btn_restart_final.setStyleSheet("""
@@ -1753,21 +1844,22 @@ class HostControllerWindow(QMainWindow):
         self.timer_bar.setFormat("30 seconds")
 
         t_layout.addWidget(self.btn_start_30s)
+        t_layout.addWidget(self.btn_manual_crossfade)
         t_layout.addWidget(self.btn_restart_final)
         t_layout.addWidget(self.btn_stop_30s)
         t_layout.addWidget(self.btn_toggle_final_answer)
         t_layout.addWidget(self.timer_bar, 1)
-        s3_layout.addLayout(t_layout)
-        layout.addWidget(self.step3_box)
+        s4_layout.addLayout(t_layout)
+        layout.addWidget(self.step4_box)
 
-        # STEP 4: Podium Reveal Sequence
-        self.step4_box = QGroupBox("STEP 4: SONY PODIUM REVEAL SEQUENCE (3RD -> 2ND -> 1ST)")
-        self.step4_box.setMinimumHeight(310)
-        self.step4_box.setEnabled(False)
-        s4_layout = QVBoxLayout(self.step4_box)
+        # STEP 5: Podium Reveal Sequence
+        self.step5_box = QGroupBox("STEP 5: SONY PODIUM REVEAL SEQUENCE (3RD -> 2ND -> 1ST)")
+        self.step5_box.setMinimumHeight(310)
+        self.step5_box.setEnabled(False)
+        s5_layout = QVBoxLayout(self.step5_box)
 
         self.reveal_cards_layout = QHBoxLayout()
-        s4_layout.addLayout(self.reveal_cards_layout)
+        s5_layout.addLayout(self.reveal_cards_layout)
 
         self.btn_calc_final = QPushButton("DETERMINE CHAMPION")
         self.btn_calc_final.setStyleSheet("""
@@ -1778,9 +1870,9 @@ class HostControllerWindow(QMainWindow):
         """)
         self.btn_calc_final.setEnabled(False)
         self.btn_calc_final.clicked.connect(self._on_calc_final)
-        s4_layout.addWidget(self.btn_calc_final)
+        s5_layout.addWidget(self.btn_calc_final)
 
-        layout.addWidget(self.step4_box)
+        layout.addWidget(self.step5_box)
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -1839,8 +1931,14 @@ class HostControllerWindow(QMainWindow):
             self.step2_box.setEnabled(True)
         if hasattr(self, "step3_box"):
             self.step3_box.setEnabled(False)
+        if hasattr(self, "btn_reveal_final_clue"):
+            self.btn_reveal_final_clue.setEnabled(True)
+        if hasattr(self, "step4_box"):
+            self.step4_box.setEnabled(False)
         if hasattr(self, "btn_start_30s"):
             self.btn_start_30s.setEnabled(True)
+        if hasattr(self, "btn_manual_crossfade"):
+            self.btn_manual_crossfade.setEnabled(False)
         if hasattr(self, "btn_restart_final"):
             self.btn_restart_final.setEnabled(False)
         if hasattr(self, "btn_stop_30s"):
@@ -1849,8 +1947,8 @@ class HostControllerWindow(QMainWindow):
             self.btn_toggle_final_answer.setText("TOGGLE TV ANSWER")
             self.btn_toggle_final_answer.setStyleSheet("background-color: #21262d; color: #8b949e; font-weight: bold; padding: 8px 16px; border: 1px solid #30363d;")
 
-        if hasattr(self, "step4_box"):
-            self.step4_box.setEnabled(False)
+        if hasattr(self, "step5_box"):
+            self.step5_box.setEnabled(False)
         if hasattr(self, "btn_calc_final"):
             self.btn_calc_final.setEnabled(False)
             self.btn_calc_final.setStyleSheet("""
@@ -1859,6 +1957,7 @@ class HostControllerWindow(QMainWindow):
                     padding: 10px; border-radius: 6px; border: 1px solid #30363d;
                 }
             """)
+        self._update_crossfade_mode_ui()
 
         if hasattr(self, "reveal_cards_layout"):
             while self.reveal_cards_layout.count():
@@ -1997,20 +2096,13 @@ class HostControllerWindow(QMainWindow):
 
         self.btn_lock_wagers.setEnabled(False)
         self.step3_box.setEnabled(True)
-        self.btn_start_30s.setEnabled(True)
+        self.btn_reveal_final_clue.setEnabled(True)
 
-    def _on_start_30s(self):
-        self.btn_start_30s.setEnabled(False)
-        self.btn_restart_final.setEnabled(True)
-        self.btn_stop_30s.setEnabled(True)
-        self.final_timer_seconds = 30
-        self.timer_bar.setValue(30)
-        self.timer_bar.setFormat("30 seconds")
-
+    def _get_final_clue_payload(self):
         if self.chk_manual_override.isChecked():
             clue_text = self.edit_clue.text().strip() or "Manual Final Jeopardy Clue"
             ans_text = self.edit_ans.text().strip() or "Manual Answer"
-            clue_data = {
+            return {
                 "round_id": 3,
                 "category_name": self.edit_cat.text().strip() or "FINAL JEOPARDY",
                 "question_text": clue_text,
@@ -2019,12 +2111,32 @@ class HostControllerWindow(QMainWindow):
                 "asset_path": ""
             }
         else:
-            clue_data = dict(self.final_clue_data) if self.final_clue_data else {"question_text": "Final Jeopardy Clue", "has_asset": False}
+            return dict(self.final_clue_data) if self.final_clue_data else {"question_text": "Final Jeopardy Clue", "has_asset": False}
 
+    def _on_reveal_final_clue(self):
+        clue_data = self._get_final_clue_payload()
         event_bus.trigger_final_step.emit(3, clue_data)
-        # Requirement #7: Emit "think_30s" matching Settings key
+        self.btn_reveal_final_clue.setEnabled(False)
+        self.step4_box.setEnabled(True)
+        self.btn_start_30s.setEnabled(True)
+
+    def _on_start_30s(self):
+        self.btn_start_30s.setEnabled(False)
+        self.btn_restart_final.setEnabled(True)
+        self.btn_stop_30s.setEnabled(True)
+        if hasattr(self, "btn_manual_crossfade"):
+            self.btn_manual_crossfade.setEnabled(True)
+        self.final_timer_seconds = 30
+        self.timer_bar.setValue(30)
+        self.timer_bar.setFormat("30 seconds")
+
+        clue_data = self._get_final_clue_payload()
+        event_bus.trigger_final_step.emit(4, clue_data)
         event_bus.play_sound_event.emit("think_30s")
         self.final_timer.start(1000)
+
+    def _on_manual_crossfade_clicked(self):
+        event_bus.start_final_crossfade.emit()
 
     def _on_restart_30s(self):
         self.final_timer_seconds = 30
@@ -2032,6 +2144,8 @@ class HostControllerWindow(QMainWindow):
         self.timer_bar.setFormat("30 seconds")
         self.btn_stop_30s.setEnabled(True)
         self.btn_restart_final.setEnabled(True)
+        if hasattr(self, "btn_manual_crossfade"):
+            self.btn_manual_crossfade.setEnabled(True)
         self.final_timer.stop()
         self.final_timer.start(1000)
         event_bus.restart_final_timer.emit()
@@ -2042,7 +2156,9 @@ class HostControllerWindow(QMainWindow):
         self.timer_bar.setFormat("EMERGENCY STOPPED")
         self.btn_stop_30s.setEnabled(False)
         self.btn_restart_final.setEnabled(True)
-        self.step4_box.setEnabled(True)
+        if hasattr(self, "btn_manual_crossfade"):
+            self.btn_manual_crossfade.setEnabled(False)
+        self.step5_box.setEnabled(True)
         self._setup_final_reveal_order()
 
     def _on_toggle_final_answer_clicked(self):
@@ -2065,14 +2181,21 @@ class HostControllerWindow(QMainWindow):
         self.timer_bar.setValue(self.final_timer_seconds)
         self.timer_bar.setFormat(f"{self.final_timer_seconds} seconds")
 
-        if self.final_timer_seconds == 15:
-            event_bus.start_final_crossfade.emit()
+        anim_cfg = self.theme.get("animations", {}) if hasattr(self, "theme") and isinstance(self.theme, dict) else {}
+        cf_mode = anim_cfg.get("final_crossfade_mode", "auto")
+        cf_sec = int(anim_cfg.get("final_crossfade_seconds", 15))
+        if cf_mode == "auto":
+            elapsed = 30 - self.final_timer_seconds
+            if elapsed == cf_sec:
+                event_bus.start_final_crossfade.emit()
 
         if self.final_timer_seconds <= 0:
             self.final_timer.stop()
             self.timer_bar.setFormat("TIME OUT! PENS DOWN!")
             self.btn_stop_30s.setEnabled(False)
-            self.step4_box.setEnabled(True)
+            if hasattr(self, "btn_manual_crossfade"):
+                self.btn_manual_crossfade.setEnabled(False)
+            self.step5_box.setEnabled(True)
             self._setup_final_reveal_order()
 
     def _setup_final_reveal_order(self):
@@ -2171,7 +2294,6 @@ class HostControllerWindow(QMainWindow):
             self.final_reveal_state[pid] = 2
             if is_correct:
                 self.s_engine.add_correct(pid, wager)
-                event_bus.play_sound_event.emit("correct")
             else:
                 self.s_engine.add_incorrect(pid, wager)
                 event_bus.play_sound_event.emit("wrong")
@@ -2588,9 +2710,10 @@ class HostControllerWindow(QMainWindow):
             return
         if is_correct:
             self.s_engine.add_correct(player_id, points)
-            event_bus.play_sound_event.emit("correct")
         else:
             self.s_engine.add_incorrect(player_id, points)
+            # FIX #2: Dừng mọi âm thanh đang phát (kể cả daily_double) trước khi phát wrong
+            self.audio_manager.stop_all()
             event_bus.play_sound_event.emit("wrong")
 
         scores = self.s_engine.get_all_scores()
@@ -2702,6 +2825,20 @@ class HostControllerWindow(QMainWindow):
         event_bus.score_updated.connect(self._on_score_updated)
         event_bus.change_round.connect(self._on_change_round)
         event_bus.unlock_round.connect(self._on_unlock_round_signal)
+        event_bus.update_theme_config.connect(self._on_theme_updated)
+
+    @Slot(dict)
+    def _on_theme_updated(self, theme_data):
+        if isinstance(theme_data, dict):
+            self.theme = theme_data
+            self._update_crossfade_mode_ui()
+
+    def _update_crossfade_mode_ui(self):
+        anim_cfg = self.theme.get("animations", {}) if hasattr(self, "theme") and isinstance(self.theme, dict) else {}
+        self.final_crossfade_mode = anim_cfg.get("final_crossfade_mode", "auto")
+        self.final_crossfade_seconds = int(anim_cfg.get("final_crossfade_seconds", 15))
+        if hasattr(self, "btn_manual_crossfade"):
+            self.btn_manual_crossfade.setVisible(self.final_crossfade_mode == "manual")
 
     @Slot(int)
     def _on_unlock_round_signal(self, round_id):
