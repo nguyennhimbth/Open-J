@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QFont, QColor, QPainter
+from PySide6.QtGui import QFont, QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QWidget,
@@ -685,11 +685,22 @@ class SettingsDialog(QDialog):
         # Static Standby Wallpaper
         row_sb = QHBoxLayout()
         self.edit_sb_img = QLineEdit(sb_img)
+        self.edit_sb_img.textChanged.connect(self._update_standby_image_preview)
         btn_b_sb = QPushButton("Browse Image...")
         btn_b_sb.clicked.connect(lambda: self._browse_image(self.edit_sb_img))
         row_sb.addWidget(self.edit_sb_img, 1)
         row_sb.addWidget(btn_b_sb)
         intro_layout.addRow("Static Standby Wallpaper (Hình nền chờ tĩnh):", row_sb)
+
+        self.standby_image_preview = QLabel()
+        self.standby_image_preview.setAlignment(Qt.AlignCenter)
+        self.standby_image_preview.setMinimumSize(320, 180)
+        self.standby_image_preview.setMaximumHeight(240)
+        self.standby_image_preview.setStyleSheet(
+            "background-color: #0d1117; border: 1px solid #30363d; color: #8b949e;"
+        )
+        intro_layout.addRow("Wallpaper Preview:", self.standby_image_preview)
+        self._update_standby_image_preview(sb_img)
 
         # Intro Video File
         row_vid = QHBoxLayout()
@@ -833,7 +844,8 @@ class SettingsDialog(QDialog):
         event_layout.setSpacing(10)
 
         lbl_snd_note = QLabel(
-            "Configure each sound effect individually. Leave blank or click 'Clear' to keep an event completely silent."
+            "Configure each sound individually. Leave blank or click 'Clear' to keep an event silent. "
+            "The shared Round 1/2 and Final category intro plays when the clue appears. Final think music starts only when the 30-second timer starts."
         )
         lbl_snd_note.setWordWrap(True)
         lbl_snd_note.setStyleSheet("color: #8b949e; font-style: italic; margin-bottom: 6px;")
@@ -841,14 +853,12 @@ class SettingsDialog(QDialog):
 
         sound_labels = {
             "board_fill": "1. Board Opening Fanfare (Lật mở 30 ô điểm):",
-            "round_category_intro": "2. Round 1 & 2 Category Reveal (Giới thiệu chủ đề đầu vòng 1 & 2):",
+            "round_category_intro": "2. Round 1/2 & Final Category Intro (Âm thanh giới thiệu chủ đề vòng 1/2 và vòng cuối):",
             "daily_double": "3. Daily Double Reveal Fanfare (Hiệu ứng mở Daily Double):",
             "timeout": "4. Timeout 5s / Lockout Tone (Hết giờ trả lời 5s):",
-            "correct": "5. Correct Response Chime (Trả lời Đúng):",
-            "wrong": "6. Incorrect Response Tone (Trả lời Sai):",
-            "final_category_intro": "7. Final Jeopardy Category Reveal (Giới thiệu chủ đề Vòng Cuối):",
-            "think_30s": "8. Final Jeopardy 30s Think Music (Nhạc suy nghĩ 30s Vòng Cuối):",
-            "outro_music": "9. Broadcast Outro Music (Nhạc kết thúc trên nền chờ tĩnh):",
+            "wrong": "5. Incorrect Response Tone (Trả lời Sai):",
+            "think_30s": "6. Final Jeopardy 30s Think Music (Nhạc suy nghĩ 30s Vòng Cuối):",
+            "outro_music": "7. Broadcast Outro Music (Nhạc kết thúc trên nền chờ tĩnh):",
         }
 
         sounds_dict = self.theme.get("sounds", {})
@@ -857,8 +867,6 @@ class SettingsDialog(QDialog):
         for k, lbl in sound_labels.items():
             row = QHBoxLayout()
             val = sounds_dict.get(k, "")
-            if k == "final_category_intro" and not val:
-                val = sounds_dict.get("category_intro", "")
             edit = QLineEdit(val)
             self.sound_edits[k] = edit
 
@@ -908,6 +916,22 @@ class SettingsDialog(QDialog):
         )
         if f:
             target_line_edit.setText(f)
+
+    def _update_standby_image_preview(self, image_path: str):
+        if not hasattr(self, "standby_image_preview"):
+            return
+        pixmap = QPixmap(image_path) if image_path and os.path.isfile(image_path) else QPixmap()
+        if pixmap.isNull():
+            self.standby_image_preview.clear()
+            self.standby_image_preview.setText("Image not found or unsupported")
+            return
+        self.standby_image_preview.setPixmap(
+            pixmap.scaled(
+                self.standby_image_preview.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        )
 
     def _browse_video(self, target_line_edit: QLineEdit):
         f, _ = QFileDialog.getOpenFileName(
@@ -1106,6 +1130,15 @@ class SettingsDialog(QDialog):
 
     def _on_apply(self):
         """Immediately stops all audio, writes XML, emits updates, and accepts dialog."""
+        standby_path = self.edit_sb_img.text().strip()
+        if standby_path and QPixmap(standby_path).isNull():
+            QMessageBox.critical(
+                self,
+                "Invalid Standby Wallpaper",
+                "The selected standby image cannot be loaded. Choose a valid image file or clear the path.",
+            )
+            return
+
         self.audio_manager.stop_all()
         self._collect_ui_to_theme()
 

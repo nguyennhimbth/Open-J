@@ -782,9 +782,12 @@ class TVCategoryCardWidget(QWidget):
         self.logo_overlay.set_bg_color(self.bg_color)
 
     def set_font_config(self, family: str, size: int, bold: bool = True, color: str = "#FFFFFF", mode: str = "dynamic"):
-        # Scale up category intro card font relative to small grid cell header size
-        intro_size = max(36, int(size * 1.8)) if mode == "custom" else max(64, int(size * 2.0))
-        self.title_label.configure_typography(family, intro_size, bold, mode, color)
+        # Reuse the same dynamic-fit algorithm as clue text so category titles scale with the actual card width.
+        base_size = max(28, int(size))
+        dynamic_limit = max(64, int(base_size * 2.0))
+        target_size = max(36, int(base_size * 1.8)) if mode == "custom" else dynamic_limit
+        self.title_label.max_point_size = max(dynamic_limit, self.title_label.max_point_size)
+        self.title_label.configure_typography(family, target_size, bold, mode, color)
 
     def set_category_title(self, title: str):
         self.title = str(title).upper()
@@ -1181,13 +1184,14 @@ class TVFinalScreenWidget(QWidget):
         self.cat_layout.setAlignment(Qt.AlignCenter)
 
         self.cat_name_lbl = AutoFitLabel(max_point_size=76, min_point_size=24, parent=self.cat_card)
+        self.cat_name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.cat_name_lbl.configure_typography(self.font_family, 56, self.font_bold, self.font_mode, self.text_color)
         self.c_shadow = QGraphicsDropShadowEffect(self.cat_name_lbl)
         self.c_shadow.setBlurRadius(2)
         self.c_shadow.setOffset(3, 3)
         self.c_shadow.setColor(QColor("#000000"))
         self.cat_name_lbl.setGraphicsEffect(self.c_shadow)
-        self.cat_layout.addWidget(self.cat_name_lbl)
+        self.cat_layout.addWidget(self.cat_name_lbl, 1)
 
         # 3. Step 3: Clue Widget with Stacked Backgrounds
         self.clue_widget = QWidget(self)
@@ -1269,11 +1273,15 @@ class TVFinalScreenWidget(QWidget):
         self.shadow_blur = int(shadow_blur)
 
         cat_fam = category_family or family
-        cat_target_size = max(36, int(self.header_font_size * 1.8)) if self.font_mode == "custom" else max(56, self.font_size)
-        self.cat_name_lbl.max_point_size = max(54, cat_target_size)
+        if self.font_mode == "custom":
+            cat_target_size = max(36, int(self.header_font_size * 1.8))
+            self.cat_name_lbl.max_point_size = max(64, cat_target_size)
+        else:
+            cat_target_size = max(56, int(self.header_font_size * 2.4))
+            self.cat_name_lbl.max_point_size = max(cat_target_size, int(self.height() * 0.22))
         self.cat_name_lbl.configure_typography(cat_fam, cat_target_size, self.font_bold, self.font_mode, color)
 
-        self.clue_content_lbl.max_point_size = max(48, self.font_size)
+        self.clue_content_lbl.max_point_size = max(54, self.font_size)
         self.clue_content_lbl.configure_typography(family, self.font_size, self.font_bold, self.font_mode, color)
 
         self.answer_label.max_point_size = max(32, self.answer_font_size)
@@ -1389,7 +1397,7 @@ class TVFinalScreenWidget(QWidget):
         self.splash_widget.setVisible(self.step == self.STEP_SPLASH)
         self.cat_widget.setVisible(self.step == self.STEP_CATEGORY)
         self.clue_widget.setVisible(self.step in (self.STEP_CLUE, self.STEP_TIMER))
-        self.progress_bar.setVisible(self.step == self.STEP_TIMER)
+        self.progress_bar.setVisible(False)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1404,6 +1412,9 @@ class TVFinalScreenWidget(QWidget):
         self.red_layer.setGeometry(0, 0, w, h)
         self.blue_layer.setGeometry(0, 0, w, h)
         self.clue_fg.setGeometry(0, 0, w, h)
+        if self.font_mode == "dynamic":
+            self.cat_name_lbl.max_point_size = max(64, int(h * 0.22))
+            self.cat_name_lbl._adjust_font_size()
 
         lbl_w = max(200, int(w * 0.86))
         lbl_h = max(52, int(h * 0.11))
@@ -2089,6 +2100,7 @@ class TVDisplayWindow(QMainWindow):
 
         self.clue_screen_widget.set_clue(raw_text, has_asset, asset_path)
         self.stack.setCurrentIndex(self.INDEX_QUESTION)
+        event_bus.play_sound_event.emit("round_category_intro")
 
     @Slot()
     def close_question(self):
@@ -2185,15 +2197,12 @@ class TVDisplayWindow(QMainWindow):
     # --- FINAL JEOPARDY TRANSITIONS ---
     @Slot(int, dict)
     def handle_final_step(self, step: int, data: dict):
-        if step == 1:
-            # FIX #3: Vòng 3 cũng dùng âm thanh hiện chủ đề giống vòng 1 & 2
-            event_bus.play_sound_event.emit("round_category_intro")
-        elif step == 2:
-            # Requirement #7: Use final_category_intro (distinct from round_category_intro and no wager_music)
-            event_bus.play_sound_event.emit("final_category_intro")
+        # Final Jeopardy sequence: splash logo -> category/clue reveals -> countdown.
         if step in (1, 2, 3, 4):
-            # Nếu TV đang ở màn hình chờ (Standby Normal) và chưa vào vòng cuối (round 3)
-            # thì giữ nguyên màn hình chờ, chỉ nạp dữ liệu bước vào widget
+            if step == TVFinalScreenWidget.STEP_CLUE:
+                event_bus.play_sound_event.emit("round_category_intro")
+            elif step == TVFinalScreenWidget.STEP_TIMER:
+                event_bus.play_sound_event.emit("think_30s")
             if self.stack.currentIndex() == self.INDEX_STANDBY_NORMAL and getattr(self, "current_round", 1) != 3:
                 self.final_screen_widget.set_step(step, data)
                 return

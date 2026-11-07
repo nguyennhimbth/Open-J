@@ -55,6 +55,13 @@ class DatabaseManager:
             )
             """)
 
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """)
+
             # 2. Categories Table
             cur.execute("""
             CREATE TABLE IF NOT EXISTS categories (
@@ -163,7 +170,9 @@ class DatabaseManager:
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM categories")
             count = cur.fetchone()[0]
-            if count == 0:
+            cur.execute("SELECT value FROM app_settings WHERE key = 'disable_default_seed'")
+            seed_disabled = cur.fetchone()
+            if count == 0 and not (seed_disabled and seed_disabled[0] == "1"):
                 print(f"[DB] Database is empty. Loading default seed dataset from {DEFAULT_SEED_PATH}...")
                 self.load_seed_file(str(DEFAULT_SEED_PATH))
 

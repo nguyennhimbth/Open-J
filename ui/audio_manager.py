@@ -164,7 +164,6 @@ class AudioManager(QObject):
         if not sound_key or sound_key == "wager_music":
             return
 
-        # Canonicalize legacy callers without cross-mixing distinct events
         canonical_map = {
             "fill": "board_fill",
             "think_music": "think_30s",
@@ -173,23 +172,33 @@ class AudioManager(QObject):
         }
         mapped_key = sound_key if sound_key in self.sound_files else canonical_map.get(sound_key, sound_key)
 
-        file_path = self.sound_files.get(mapped_key, "")
-        if not file_path:
-            return
+        candidates = [mapped_key]
+        if mapped_key == "final_category_intro":
+            candidates.extend(["round_category_intro", "category_intro"])
+        elif mapped_key == "round_category_intro":
+            candidates.extend(["category_intro"])
 
-        full_path = self._resolve_sound_path(file_path)
-        if not full_path or not full_path.is_file():
+        full_path = None
+        for key in candidates:
+            file_path = self.sound_files.get(key, "")
+            if not file_path:
+                continue
+            resolved = self._resolve_sound_path(file_path)
+            if resolved and resolved.is_file():
+                full_path = resolved
+                mapped_key = key
+                break
+
+        if not full_path:
             return
 
         try:
-            # Long tracks (think_30s, outro_music) use self.player
             if mapped_key in ("think_30s", "outro_music"):
                 self.player.stop()
                 self.player.setSource(QUrl.fromLocalFile(str(full_path)))
                 self.player.play()
                 return
 
-            # WAV SFX cached in QSoundEffect
             if full_path.suffix.lower() == ".wav":
                 if mapped_key not in self.sfx_effects:
                     eff = QSoundEffect(self)
@@ -201,7 +210,6 @@ class AudioManager(QObject):
                 eff.play()
                 return
 
-            # Compressed SFX (.mp3, .m4a, .aac, .ogg) use self.sfx_player
             self.sfx_player.stop()
             self.sfx_player.setSource(QUrl.fromLocalFile(str(full_path)))
             self.sfx_player.play()

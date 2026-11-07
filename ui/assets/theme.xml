@@ -1,19 +1,19 @@
 <?xml version="1.0" ?>
 <JeopardyTheme name="Custom_Broadcast_Package" performance_profile="ultra">
-    <Bezel color="#000000" width="9"/>
-    <StandbyScreen image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image2.png"/>
+    <Bezel color="#000000" width="2"/>
+    <StandbyScreen image_path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/image2.png"/>
     <StandbyMosaicZone>
-        <MosaicImage path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image2.png"/>
+        <MosaicImage path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/image2.png"/>
     </StandbyMosaicZone>
     <HeaderZone>
-        <UnrevealedLogo path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image2.png"/>
+        <UnrevealedLogo path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/image2.png"/>
         <RevealedBackground path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image1.jpeg"/>
-        <Font family="ITC Korinna" size="28" bold="false" color="#FFFFFF" mode="dynamic"/>
+        <Font family="ITC Korinna VN" size="28" bold="false" color="#FFFFFF" mode="dynamic"/>
     </HeaderZone>
-    <CategoryHeaders fit_mode="zoom" auto_crop_logo="true" final_family="ITC Korinna">
-        <StateUnrevealed image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image2.png"/>
+    <CategoryHeaders fit_mode="stretch" auto_crop_logo="true" final_family="ITC Korinna VN">
+        <StateUnrevealed image_path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/image2.png"/>
         <StateRevealed image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image1.jpeg"/>
-        <Font family="ITC Korinna" size="28" bold="false" color="#FFFFFF" mode="dynamic"/>
+        <Font family="ITC Korinna VN" size="28" bold="false" color="#FFFFFF" mode="dynamic"/>
     </CategoryHeaders>
     <PointGrid fit_mode="zoom">
         <Mode use_image="true"/>
@@ -25,23 +25,23 @@
         <OuterBackground color="#000000"/>
         <StandardCard color="#060CE9" image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image7.jpeg" use_image="true"/>
         <FinalCard color="#8B0000" image_path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image32.png" use_image="true"/>
-        <Font family="ITC Korinna" size="28" answer_size="28" header_size="28" bold="false" color="#FFFFFF" mode="dynamic"/>
+        <Font family="ITC Korinna VN" size="28" answer_size="28" header_size="28" bold="false" color="#FFFFFF" mode="dynamic"/>
         <Shadow blur="2" dx="3" dy="3" color="#000000"/>
     </ClueScreen>
     <VisualFX>
-        <DailyDoubleSplash path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image30.jpeg"/>
-        <FinalLogoSplash path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/image31.png"/>
+        <DailyDoubleSplash path="C:/Users/Admin/Downloads/Gemini_Generated_Image_re4selre4selre4s.png"/>
+        <FinalLogoSplash path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/image2.png"/>
     </VisualFX>
-    <Animations enable_point_zoom="true" zoom_duration_ms="400" enable_dd_flip="true" flip_duration_ms="900" intro_video_path="" intro_merge_seconds="2.0" intro_fade_duration_ms="1800" final_crossfade_mode="auto" final_crossfade_seconds="15" outro_music_path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/2001-2008 Road Show Theme Song ｜ Jeopardy! [G8z4v27eVig].mp3"/>
+    <Animations enable_point_zoom="true" zoom_duration_ms="400" enable_dd_flip="true" flip_duration_ms="900" intro_video_path="" intro_merge_seconds="0.5" intro_fade_duration_ms="1800" final_crossfade_mode="auto" final_crossfade_seconds="15" outro_music_path=""/>
     <Sounds>
-        <Sound key="board_fill" path="assets/sounds/fill.mp3"/>
-        <Sound key="round_category_intro" path="assets/sounds/category_intro.wav"/>
-        <Sound key="daily_double" path="assets/sounds/daily_double.wav"/>
-        <Sound key="timeout" path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/audio2.wav"/>
-        <Sound key="correct" path="assets/sounds/correct.wav"/>
-        <Sound key="wrong" path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/audio2.wav"/>
-        <Sound key="final_category_intro" path="C:/Users/Admin/Downloads/jep! (1) - Copy/media/audio1.wav"/>
-        <Sound key="think_30s" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/Jeopardy! Think! Theme (September 15, 1997 - July 25, 2008).wav"/>
-        <Sound key="outro_music" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/2001-2008 Road Show Theme Song ｜ Jeopardy! [G8z4v27eVig].mp3"/>
+        <Sound key="board_fill" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/board opening.mp3"/>
+        <Sound key="round_category_intro" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/reaveal_category.wav"/>
+        <Sound key="daily_double" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/dd.wav"/>
+        <Sound key="timeout" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/wrong.wav"/>
+        <Sound key="correct" path=""/>
+        <Sound key="wrong" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/wrong.wav"/>
+        <Sound key="final_category_intro" path=""/>
+        <Sound key="think_30s" path="C:/Users/Admin/Downloads/Project_Open-J/REFERENCE/Jeopardy! Think Mashup 8 [5ZGuWaF7ZAs].mp3"/>
+        <Sound key="outro_music" path=""/>
     </Sounds>
 </JeopardyTheme>

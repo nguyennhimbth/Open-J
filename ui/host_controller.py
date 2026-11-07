@@ -9,9 +9,12 @@ Includes:
 """
 
 import os
+import re
 import sys
 import sqlite3
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from openpyxl import load_workbook
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -194,8 +197,17 @@ class HostControllerWindow(QMainWindow):
         self.db_path = db_path
 
         self.setWindowTitle("Open-J | Host Controller Dashboard")
-        self.setMinimumSize(1280, 800)
-        self.resize(1366, 860)
+        screen = QApplication.primaryScreen()
+        available_geometry = screen.availableGeometry() if screen else None
+        screen_width = available_geometry.width() if available_geometry else 1366
+        screen_height = available_geometry.height() if available_geometry else 860
+        min_width = min(900, screen_width)
+        min_height = min(560, screen_height)
+        self.setMinimumSize(min_width, min_height)
+        self.resize(
+            max(min_width, min(1366, int(screen_width * 0.94))),
+            max(min_height, min(860, int(screen_height * 0.9))),
+        )
 
         # Core Engines
         if q_engine is None:
@@ -397,6 +409,7 @@ class HostControllerWindow(QMainWindow):
         self._load_final_jeopardy_data()
         self._reset_final_jeopardy_sequence(keep_clue=True)
         self._reset_buzzers()
+        event_bus.score_updated.emit(self.s_engine.get_all_scores())
         event_bus.reset_game_state.emit()
         self.tabs.setCurrentIndex(0)
         self.roster_status.setText("Status: Match reset. Ready to start.")
@@ -462,18 +475,13 @@ class HostControllerWindow(QMainWindow):
         """Unified top ribbon consolidating Standby, Intro Video Merge, Outro Music, and Round coordination."""
         header_widget = QWidget()
         header_widget.setStyleSheet("background-color: #161b22; border-bottom: 1px solid #30363d;")
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(16, 8, 16, 8)
-        header_layout.setSpacing(10)
+        header_layout = QVBoxLayout(header_widget)
+        header_layout.setContentsMargins(12, 6, 12, 6)
+        header_layout.setSpacing(4)
 
         title_lbl = QLabel("OPEN-J | CONTROLLER")
         title_lbl.setStyleSheet("font-size: 15px; font-weight: 900; color: #58a6ff; letter-spacing: 1px;")
-        header_layout.addWidget(title_lbl)
-
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.VLine)
-        sep1.setStyleSheet("color: #30363d;")
-        header_layout.addWidget(sep1)
+        title_lbl.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
 
         # Commercial Break / Standby Waiting Screen Button
         self._break_active = False
@@ -513,18 +521,21 @@ class HostControllerWindow(QMainWindow):
             QPushButton:hover { background-color: #a371f7; }
         """)
         self.btn_play_outro_music.clicked.connect(self._on_top_play_outro_music)
-        header_layout.addWidget(self.btn_play_outro_music)
 
-        header_layout.addStretch()
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        action_row.addWidget(title_lbl)
+        action_row.addWidget(self.btn_commercial_break)
+        action_row.addWidget(self.btn_play_intro_video)
+        action_row.addWidget(self.btn_play_outro_music)
+        action_row.addStretch()
+        header_layout.addLayout(action_row)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.VLine)
-        sep2.setStyleSheet("color: #30363d;")
-        header_layout.addWidget(sep2)
-
+        round_row = QHBoxLayout()
+        round_row.setSpacing(8)
         lbl_round_tag = QLabel("ROUND:")
         lbl_round_tag.setStyleSheet("font-size: 11px; font-weight: 800; color: #8b949e;")
-        header_layout.addWidget(lbl_round_tag)
+        round_row.addWidget(lbl_round_tag)
 
         self.btn_round1 = QPushButton("[ 1. JEOPARDY! ]")
         self.btn_round2 = QPushButton("[ 2. DOUBLE JEOPARDY! ]")
@@ -544,9 +555,11 @@ class HostControllerWindow(QMainWindow):
 
         self._update_round_button_styles()
 
-        header_layout.addWidget(self.btn_round1)
-        header_layout.addWidget(self.btn_round2)
-        header_layout.addWidget(self.btn_round3)
+        round_row.addWidget(self.btn_round1)
+        round_row.addWidget(self.btn_round2)
+        round_row.addWidget(self.btn_round3)
+        round_row.addStretch()
+        header_layout.addLayout(round_row)
 
         self.header_widget = header_widget
 
@@ -844,6 +857,7 @@ class HostControllerWindow(QMainWindow):
 
         # Left: 6x5 Matrix Board
         left_frame = QFrame()
+        left_frame.setMinimumWidth(360)
         left_frame.setStyleSheet("background-color: #000000; border: 1px solid #1e293b; border-radius: 0px;")
         l_layout = QVBoxLayout(left_frame)
         l_layout.setContentsMargins(8, 8, 8, 8)
@@ -853,6 +867,7 @@ class HostControllerWindow(QMainWindow):
 
         self.cat_headers = []
         for c in range(6):
+            self.grid_layout.setColumnStretch(c, 1)
             lbl = QLabel(f"CATEGORY {c+1}")
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setWordWrap(True)
@@ -871,10 +886,11 @@ class HostControllerWindow(QMainWindow):
 
         self.clue_buttons = {}
         for r in range(5):
+            self.grid_layout.setRowStretch(r + 1, 1)
             for c in range(6):
                 btn = QPushButton("$0")
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                btn.setMinimumSize(76, 48)
+                btn.setMinimumSize(48, 40)
                 btn.setCursor(Qt.PointingHandCursor)
                 btn.clicked.connect(lambda chk=False, col=c, row=r: self._on_clue_button_clicked(col, row))
                 self.clue_buttons[(c, r)] = btn
@@ -885,6 +901,7 @@ class HostControllerWindow(QMainWindow):
 
         # Right: Peek Box + 5-Second Countdown + Inline DD Wager + 2-Step Broadcast Controls
         right_frame = QFrame()
+        right_frame.setMinimumWidth(280)
         right_frame.setStyleSheet("background-color: #161b22; border: 1px solid #30363d; border-radius: 6px;")
         r_layout = QVBoxLayout(right_frame)
         r_layout.setContentsMargins(14, 12, 14, 12)
@@ -1047,12 +1064,16 @@ class HostControllerWindow(QMainWindow):
 
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
+        right_scroll.setMinimumWidth(280)
         right_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         right_scroll.setWidget(right_frame)
 
         splitter.addWidget(right_scroll)
         splitter.setStretchFactor(0, 64)
         splitter.setStretchFactor(1, 36)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+        splitter.setSizes([640, 360])
         layout.addWidget(splitter)
 
         finish_row = QHBoxLayout()
@@ -1368,6 +1389,13 @@ class HostControllerWindow(QMainWindow):
                 full_q = self.q_engine.get_question(round_id, c, r)
                 self.board_cache[(c, r)] = full_q if full_q else row_data
 
+        for col, header in enumerate(self.cat_headers):
+            all_col_used = all(
+                bool(self.board_cache.get((col, row), {}).get("is_used", 0))
+                for row in range(5)
+            )
+            self._apply_category_header_style(header, is_used=all_col_used)
+
         board_items = []
         for r in range(5):
             expected_pts = (r + 1) * base_multiplier
@@ -1392,6 +1420,30 @@ class HostControllerWindow(QMainWindow):
         cat_names = [self.cat_headers[c].text() for c in range(6)]
         event_bus.sync_categories_to_tv.emit(cat_names)
         event_bus.sync_board_state_to_tv.emit(board_items)
+
+    def _apply_category_header_style(self, header, is_used=False):
+        if is_used:
+            header.setStyleSheet("""
+                background-color: #090d16;
+                color: #484f58;
+                font-weight: 800;
+                font-size: 13px;
+                border: 2px solid #21262d;
+                border-radius: 0px;
+                padding: 6px 2px;
+                min-height: 44px;
+            """)
+        else:
+            header.setStyleSheet("""
+                background-color: #0b1354;
+                color: #ffffff;
+                font-weight: 800;
+                font-size: 13px;
+                border: 2px solid #1e3a8a;
+                border-radius: 0px;
+                padding: 6px 2px;
+                min-height: 44px;
+            """)
 
     def _apply_clue_button_style(self, btn, is_used=False, is_selected=False, is_dd=False):
         if is_used:
@@ -1590,17 +1642,8 @@ class HostControllerWindow(QMainWindow):
             bool(self.board_cache.get((col, r), {}).get("is_used", 0))
             for r in range(5)
         )
-        if all_col_used and 0 <= col < len(self.cat_headers):
-            self.cat_headers[col].setStyleSheet("""
-                background-color: #090d16;
-                color: #484f58;
-                font-weight: 800;
-                font-size: 13px;
-                border: 2px solid #21262d;
-                border-radius: 0px;
-                padding: 6px 2px;
-                min-height: 44px;
-            """)
+        if 0 <= col < len(self.cat_headers):
+            self._apply_category_header_style(self.cat_headers[col], is_used=all_col_used)
 
         self.tv_answer_visible = False
         self.dd_wager_frame.setVisible(False)
@@ -2082,7 +2125,6 @@ class HostControllerWindow(QMainWindow):
 
     def _on_show_category_tv(self):
         cat_name = self.edit_cat.text().strip() if self.chk_manual_override.isChecked() else (self.final_clue_data['category_name'] if self.final_clue_data else "FINAL JEOPARDY")
-        # Requirement #7: trigger_final_step(2) plays "final_category_intro" on TV; wager_music removed!
         event_bus.trigger_final_step.emit(2, {"category": cat_name})
 
     def _on_lock_wagers(self):
@@ -2129,10 +2171,8 @@ class HostControllerWindow(QMainWindow):
         self.final_timer_seconds = 30
         self.timer_bar.setValue(30)
         self.timer_bar.setFormat("30 seconds")
-
         clue_data = self._get_final_clue_payload()
         event_bus.trigger_final_step.emit(4, clue_data)
-        event_bus.play_sound_event.emit("think_30s")
         self.final_timer.start(1000)
 
     def _on_manual_crossfade_clicked(self):
@@ -2378,6 +2418,17 @@ class HostControllerWindow(QMainWindow):
         btn_reset = QPushButton("Reset Used Flags (is_used=0)")
         btn_reset.clicked.connect(self._on_reset_used_flags)
 
+        btn_import_xlsx = QPushButton("Import XLSX (Replace Question Bank)")
+        btn_import_xlsx.setToolTip(
+            "Imports columns: Round, Category, Points, Question, Answer; "
+            "Col and Row are optional. Round 1 and 2 require six categories with at least six clues each."
+        )
+        btn_import_xlsx.clicked.connect(self._on_import_xlsx)
+
+        btn_clear_all = QPushButton("DELETE ALL DATABASE DATA")
+        btn_clear_all.setStyleSheet("background-color: #8b1e1e; color: white; font-weight: bold;")
+        btn_clear_all.clicked.connect(self._on_delete_all_database_data)
+
         top.addWidget(lbl)
         top.addWidget(self.filter_combo)
         top.addSpacing(16)
@@ -2386,6 +2437,12 @@ class HostControllerWindow(QMainWindow):
         top.addWidget(btn_reset)
         top.addStretch()
         layout.addLayout(top)
+
+        database_actions = QHBoxLayout()
+        database_actions.addWidget(btn_import_xlsx)
+        database_actions.addWidget(btn_clear_all)
+        database_actions.addStretch()
+        layout.addLayout(database_actions)
 
         self.db_table = QTableWidget()
         self.db_cols = ["ID", "Round", "Col", "Row", "Category", "Points", "Question", "Answer", "Asset File", "Daily Double", "Is Used"]
@@ -2414,7 +2471,354 @@ class HostControllerWindow(QMainWindow):
     def _get_db_conn(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    @staticmethod
+    def _normalize_xlsx_header(value):
+        return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+    @staticmethod
+    def _parse_xlsx_round(value, row_number):
+        text = str(value or "").strip().lower()
+        if "final" in text:
+            return 3
+        if "tie" in text:
+            return 4
+        match = re.search(r"(?:^|\bround\s*)([1-4])(?=\s|$|\()", text)
+        if match:
+            return int(match.group(1))
+        try:
+            number = Decimal(text)
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ValueError
+            round_id = int(number)
+        except (InvalidOperation, ValueError):
+            raise ValueError(f"Row {row_number}: Round must be 1, 2, 3, or 4.")
+        if round_id not in (1, 2, 3, 4):
+            raise ValueError(f"Row {row_number}: Round must be 1, 2, 3, or 4.")
+        return round_id
+
+    @staticmethod
+    def _parse_xlsx_integer(value, field_name, row_number, default=None):
+        if value is None or str(value).strip() == "":
+            if default is not None:
+                return default
+            raise ValueError(f"Row {row_number}: {field_name} is required.")
+        text = str(value).strip().replace(",", "").replace("$", "")
+        try:
+            number = Decimal(text)
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ValueError
+            return int(number)
+        except (InvalidOperation, ValueError):
+            raise ValueError(f"Row {row_number}: {field_name} must be a whole number.")
+
+    @staticmethod
+    def _parse_xlsx_bool(value, field_name, row_number):
+        if value is None or str(value).strip() == "":
+            return 0
+        if isinstance(value, bool):
+            return int(value)
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "y"):
+            return 1
+        if text in ("0", "false", "no", "n"):
+            return 0
+        raise ValueError(f"Row {row_number}: {field_name} must be Yes/No or True/False.")
+
+    def _read_xlsx_question_bank(self, file_path):
+        workbook = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            sheet = workbook.active
+            values = sheet.iter_rows(values_only=True)
+            headers = next(values, None)
+            if not headers:
+                raise ValueError("The selected workbook is empty.")
+
+            aliases = {
+                "round": "round",
+                "roundid": "round",
+                "roundnumber": "round",
+                "category": "category",
+                "categoryname": "category",
+                "points": "points",
+                "value": "points",
+                "cluevalue": "points",
+                "question": "question",
+                "questiontext": "question",
+                "clue": "question",
+                "cluetext": "question",
+                "answer": "answer",
+                "answertext": "answer",
+                "response": "answer",
+                "col": "col",
+                "column": "col",
+                "colindex": "col",
+                "columnindex": "col",
+                "row": "row",
+                "rowindex": "row",
+                "asset": "asset",
+                "assetfile": "asset",
+                "assetfilename": "asset",
+                "dailydouble": "daily_double",
+                "isdailydouble": "daily_double",
+                "isdd": "daily_double",
+                "isused": "is_used",
+            }
+            columns = {}
+            for index, header in enumerate(headers):
+                normalized = self._normalize_xlsx_header(header)
+                field = aliases.get(normalized)
+                if field and field not in columns:
+                    columns[field] = index
+
+            required = {"round", "category", "points", "question", "answer"}
+            missing = sorted(required - columns.keys())
+            if missing:
+                raise ValueError(
+                    "Missing required column(s): "
+                    + ", ".join(missing)
+                    + ". Required headers: Round, Category, Points, Question, Answer."
+                )
+
+            records = []
+            category_order = {}
+            next_category_index = {}
+            category_clue_counts = {}
+            for row_number, row in enumerate(values, start=2):
+                if not row or not any(value is not None and str(value).strip() for value in row):
+                    continue
+
+                def cell(field, default=None):
+                    index = columns.get(field)
+                    return row[index] if index is not None and index < len(row) else default
+
+                round_id = self._parse_xlsx_round(cell("round"), row_number)
+                category = str(cell("category") or "").strip()
+                question = str(cell("question") or "").strip()
+                answer = str(cell("answer") or "").strip()
+                if not category or not question or not answer:
+                    raise ValueError(f"Row {row_number}: Category, Question, and Answer cannot be blank.")
+
+                points = self._parse_xlsx_integer(cell("points"), "Points", row_number)
+                if points < 0:
+                    raise ValueError(f"Row {row_number}: Points cannot be negative.")
+                group_key = (round_id, category.casefold())
+                if group_key not in category_order:
+                    category_order[group_key] = next_category_index.get(round_id, 0)
+                    next_category_index[round_id] = category_order[group_key] + 1
+                category_index = category_order[group_key]
+                clue_index = category_clue_counts.get(group_key, 0)
+                category_clue_counts[group_key] = clue_index + 1
+
+                col_index = self._parse_xlsx_integer(
+                    cell("col"), "Col", row_number, default=category_index % 6
+                )
+                row_index = self._parse_xlsx_integer(
+                    cell("row"), "Row", row_number, default=clue_index % 6
+                )
+                if col_index not in range(6) or row_index not in range(6):
+                    raise ValueError(f"Row {row_number}: Col and Row must be between 0 and 5.")
+
+                records.append({
+                    "round_id": round_id,
+                    "category": category,
+                    "category_key": category.casefold(),
+                    "group_key": group_key,
+                    "category_index": category_index,
+                    "col_index": col_index,
+                    "row_index": row_index,
+                    "points": points,
+                    "question": question,
+                    "answer": answer,
+                    "asset": str(cell("asset") or "").strip(),
+                    "is_daily_double": self._parse_xlsx_bool(
+                        cell("daily_double"), "Daily Double", row_number
+                    ),
+                    "is_used": self._parse_xlsx_bool(cell("is_used"), "Is Used", row_number),
+                })
+
+            if not records:
+                raise ValueError("The selected workbook has no question rows.")
+
+            group_sizes = {}
+            group_names = {}
+            for record in records:
+                key = record["group_key"]
+                group_sizes[key] = group_sizes.get(key, 0) + 1
+                group_names.setdefault(key, record["category"])
+
+            for round_id in (1, 2):
+                round_groups = [key for key in group_sizes if key[0] == round_id]
+                if len(round_groups) < 6:
+                    raise ValueError(
+                        f"Round {round_id} needs at least 6 categories; found {len(round_groups)}."
+                    )
+                for key in round_groups:
+                    if group_sizes[key] < 6:
+                        raise ValueError(
+                            f"Round {round_id}, category '{group_names[key]}' needs at least 6 clues."
+                        )
+
+            if not any(record["round_id"] == 3 for record in records):
+                raise ValueError("The workbook must contain at least one Round 3 Final Jeopardy clue.")
+
+            return records
+        finally:
+            workbook.close()
+
+    def _replace_question_bank(self, records):
+        with self._get_db_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM clue_events")
+            cursor.execute("DELETE FROM clues")
+            cursor.execute("DELETE FROM categories")
+            cursor.execute("DELETE FROM questions")
+            cursor.execute("DELETE FROM app_settings WHERE key = 'disable_default_seed'")
+
+            category_ids = {}
+            for record in records:
+                key = record["group_key"]
+                if key not in category_ids:
+                    cursor.execute(
+                        "INSERT INTO categories (name, round_id, description, is_active) VALUES (?, ?, '', 1)",
+                        (record["category"], record["round_id"]),
+                    )
+                    category_ids[key] = cursor.lastrowid
+
+                cursor.execute("""
+                    INSERT INTO clues (
+                        category_id, round_id, col_index, row_index, points, clue_text,
+                        answer_text, asset_filename, is_daily_double, is_used, is_ongame,
+                        is_tiebreaker
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                """, (
+                    category_ids[key], record["round_id"], record["col_index"],
+                    record["row_index"], record["points"], record["question"],
+                    record["answer"], record["asset"], record["is_daily_double"],
+                    record["is_used"], int(record["round_id"] == 4),
+                ))
+                cursor.execute("""
+                    INSERT INTO questions (
+                        round_id, col_index, row_index, category_name, points,
+                        question_text, answer_text, asset_filename, is_daily_double,
+                        is_used, is_ongame
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """, (
+                    record["round_id"], record["col_index"], record["row_index"],
+                    record["category"], record["points"], record["question"],
+                    record["answer"], record["asset"], record["is_daily_double"],
+                    record["is_used"],
+                ))
+            conn.commit()
+
+    def _on_import_xlsx(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Question Bank from Excel", "", "Excel Workbook (*.xlsx)"
+        )
+        if not file_path:
+            return
+        try:
+            records = self._read_xlsx_question_bank(file_path)
+            category_count = len({record["group_key"] for record in records})
+            reply = QMessageBox.question(
+                self,
+                "Replace Question Bank",
+                f"Import {len(records)} clues in {category_count} categories from:\n{file_path}\n\n"
+                "This replaces all current questions and removes clue-event history. "
+                "Player and match records are preserved. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            self._replace_question_bank(records)
+            self._reset_after_question_bank_change()
+            self._refresh_database_table()
+            self._load_board_for_round(1)
+            self._load_final_jeopardy_data()
+            self._reset_final_jeopardy_sequence(keep_clue=True)
+            self.db_status.setText(f"Imported {len(records)} clues from Excel.")
+            QMessageBox.information(
+                self,
+                "Import Complete",
+                f"Imported {len(records)} clues. Lock the roster to activate categories for a new match.",
+            )
+        except Exception as ex:
+            QMessageBox.critical(self, "Excel Import Error", str(ex))
+
+    def _on_delete_all_database_data(self):
+        reply = QMessageBox.question(
+            self,
+            "Delete All Database Data",
+            "Permanently delete all questions, categories, clue history, matches, and player records?\n\n"
+            "Database tables and round configuration will remain. This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            with self._get_db_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM clue_events")
+                cursor.execute("DELETE FROM matches")
+                cursor.execute("DELETE FROM players")
+                cursor.execute("DELETE FROM clues")
+                cursor.execute("DELETE FROM categories")
+                cursor.execute("DELETE FROM questions")
+                cursor.execute(
+                    "INSERT INTO app_settings (key, value) VALUES ('disable_default_seed', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+                )
+                cursor.execute(
+                    "DELETE FROM sqlite_sequence WHERE name IN ('questions', 'clues', 'categories', 'matches', 'players', 'clue_events')"
+                )
+                conn.commit()
+
+            self._reset_after_question_bank_change()
+            self._refresh_database_table()
+            self._load_board_for_round(1)
+            self._load_final_jeopardy_data()
+            self._reset_final_jeopardy_sequence(keep_clue=True)
+            self.db_status.setText("All database records deleted.")
+            QMessageBox.information(
+                self,
+                "Database Cleared",
+                "All question, category, clue-event, match, and player records were deleted.",
+            )
+        except Exception as ex:
+            QMessageBox.critical(self, "Database Error", str(ex))
+
+    def _reset_after_question_bank_change(self):
+        self.q_engine.session_locked = False
+        self.q_engine.session_data.clear()
+        self.q_engine.load_round(1)
+        self.current_round = 1
+        self.unlocked_rounds = {1: True, 2: False, 3: False}
+        self.selected_points = 200
+        self._update_round_button_styles()
+        self.btn_finish_round.setText("COMPLETE ROUND 1 & UNLOCK ROUND 2")
+        self.btn_finish_round.setEnabled(True)
+        self.btn_finish_round.setStyleSheet("""
+            QPushButton {
+                background-color: #238636;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 10px 24px;
+                border-radius: 6px;
+                border: 1px solid #2ea043;
+            }
+            QPushButton:hover { background-color: #2ea043; }
+        """)
+        for player_id in ("p1", "p2", "p3"):
+            if player_id in self.score_cards:
+                self.score_cards[player_id]["btn_add"].setText("+$200")
+                self.score_cards[player_id]["btn_sub"].setText("-$200")
+        self.tabs.setCurrentIndex(0)
 
     def _refresh_database_table(self):
         f_idx = self.filter_combo.currentIndex()
@@ -2571,6 +2975,12 @@ class HostControllerWindow(QMainWindow):
         dock_title_lbl = QLabel("LIVE SCORING CONTROLS")
         dock_title_lbl.setStyleSheet("font-size: 12px; font-weight: bold; color: #8b949e;")
 
+        self.btn_open_score_overlay = QPushButton("Open Score Overlay")
+        self.btn_open_score_overlay.setStyleSheet(
+            "background-color: #1f6feb; color: white; font-weight: bold; padding: 4px 10px;"
+        )
+        self.btn_open_score_overlay.clicked.connect(self._open_score_overlay)
+
         self.btn_dock_toggle = QPushButton("[-] Collapse")
         self.btn_dock_toggle.setStyleSheet("""
             QPushButton {
@@ -2583,6 +2993,7 @@ class HostControllerWindow(QMainWindow):
 
         dock_header.addWidget(dock_title_lbl)
         dock_header.addStretch()
+        dock_header.addWidget(self.btn_open_score_overlay)
         dock_header.addWidget(self.btn_dock_toggle)
         dock_layout.addLayout(dock_header)
 
@@ -2689,7 +3100,7 @@ class HostControllerWindow(QMainWindow):
 
         self.score_dock.setWidget(dock_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.score_dock)
-        self.resizeDocks([self.score_dock], [260], Qt.Vertical)
+        self.resizeDocks([self.score_dock], [min(260, int(self.height() * 0.3))], Qt.Vertical)
 
     def _toggle_dock_collapse(self):
         self.is_dock_collapsed = not getattr(self, "is_dock_collapsed", False)
@@ -2701,6 +3112,34 @@ class HostControllerWindow(QMainWindow):
             self.dock_compact_widget.setVisible(False)
             self.dock_detailed_widget.setVisible(True)
             self.btn_dock_toggle.setText("[-] Collapse")
+
+    def _open_score_overlay(self):
+        if getattr(self, "score_overlay", None) is not None:
+            self.score_overlay.show()
+            self.score_overlay.raise_()
+            self.score_overlay.activateWindow()
+            return
+
+        try:
+            from ui.score_overlay import ScoreOverlayWindow
+        except ModuleNotFoundError as ex:
+            if ex.name != "ui.score_overlay":
+                raise
+            QMessageBox.warning(
+                self,
+                "Score Overlay Unavailable",
+                "The optional ui/score_overlay.py module is missing.",
+            )
+            return
+
+        self.score_overlay = ScoreOverlayWindow(linked=True)
+        self.score_overlay.setAttribute(Qt.WA_DeleteOnClose)
+        self.score_overlay.set_players(self.contestants)
+        self.score_overlay.set_scores(self.s_engine.get_all_scores())
+        self.score_overlay.destroyed.connect(lambda: setattr(self, "score_overlay", None))
+        event_bus.players_updated.connect(self.score_overlay.set_players)
+        event_bus.score_updated.connect(self.score_overlay.set_scores)
+        self.score_overlay.show()
 
     def _update_buzzer_lockout_ui(self):
         pass
